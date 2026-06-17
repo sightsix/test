@@ -1,0 +1,6 @@
+// Negative: colon-style type annotation is rejected; use space-separated form.
+//   Wrong: let x: int = 42
+//   Right: let x int = 42
+fn main()
+    let x: int = 42
+    print(x)

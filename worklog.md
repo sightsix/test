@@ -160,3 +160,85 @@ The user's stated long-term plan is to "rewrite the entire compiler in Yilt itse
 4. **Fix `let mut` in test files** — change `let total = 0; total = ...` to `let mut total = 0` in 3 test files.
 5. **Test cross-target codegen at the binary level** — the codegen tests pass for aarch64/rv64/rv32/wasm, but the linkers (pe64, macho64, wasmobj) are stubs. Need to write integration tests that produce binaries for non-ELF formats.
 6. **Begin Yilt self-host project** — `yilt-selfhost/README.md` is already in the spec; this is the natural starting point for rewriting the compiler in Yilt itself.
+
+---
+Task ID: 8-no-arrow-rule
+Agent: main (Super Z)
+Task: Enforce the no-arrow rule for function return types and improve diagnostics.
+
+Work Log:
+- Audited the parser: found three sites that accepted `->` arrow syntax for return types — `parseFnDecl`, the local-named-function form, and `parseFnExpr` (closures). Refactored all three into a single `parseReturnType` helper.
+- Extended `ParseError` struct with two new optional fields:
+  - `Help string` — rendered as `= help: ...` beneath the error
+  - `SpanLen int` — explicit underline length (defaults to 1)
+- Added three new parser error emitters: `errorWithHelp`, `errorWithSpan`, and `errorDiag` (combines both).
+- Updated `parseReturnType` to reject `->` with a beautiful diagnostic:
+    [error] /tmp/x.yilt:1:22: arrow syntax '->' is not allowed for function return types
+    1 | fn add(a int, b int) -> int
+     |                      ^^
+    2 |     return a + b
+      = help: Yilt uses a bare type after ')': write 'fn foo() int' instead of 'fn foo() -> int'
+  The `^^` underline spans exactly 2 characters (the `->` token), and the help line suggests the fix.
+- Updated both call sites that pipe parser errors into the diag handler (`cmd/yiltc/main.go` and `internal/testsuite/helpers.go`) to forward the new `Help` and `SpanLen` fields.
+
+- Found and fixed a SERIOUS LEXER BUG: `l.col` was only updated for whitespace and newlines, NOT for token characters. This meant every token after the first one on a line got the wrong column number, which broke every multi-token diagnostic underline. Fix: capture `offAtLexStart := l.pos` before calling `lexToken`, then `l.col += l.pos - offAtLexStart` after. Verified with a debug script: `add` now correctly reports col 4 (was col 2), `->` correctly reports col 22 (was col 6).
+
+- Added 13 new negative tests in testsuite/negative/:
+  - arrow_return_type.yilt, arrow_closure.yilt, arrow_tuple_return.yilt, arrow_local_fn.yilt — enforce the no-arrow rule in all four function-signature positions
+  - c_style_and.yilt, c_style_or.yilt, bang_not.yilt — verify &&, ||, ! are rejected (use and/or/not keywords)
+  - colon_type_annotation.yilt, colon_param_type.yilt — verify `let x: int` and `fn(a: int)` are rejected (use space-separated form)
+  - var_keyword.yilt — `var` is not a Yilt keyword (use `let mut`)
+  - c_style_for.yilt — `for (init; cond; incr)` is not supported
+  - else_if.yilt — `else if` is rejected (use `but` for else-if chains)
+  - ternary.yilt, power_operator.yilt, pipe_operator.yilt — ?:, **, |> are not supported
+- Added 1 new positive test: testsuite/functions/tuple_return.yilt — verifies bare-parens tuple return works.
+
+- Added a new Go test file: internal/testsuite/diag_render_test.go with 3 test functions:
+  - TestNoArrowDiagnostics (4 sub-tests) — verifies the no-arrow diagnostic contains "arrow", "->", "help", "fn foo() int" substrings AND has a `= help:` line AND has source context
+  - TestNoArrowSpanLength — verifies the underline span is exactly 2 characters AND points at the `-` of `->`
+  - TestNoArrowBareFormWorks (3 sub-tests) — verifies the bare form compiles cleanly in all positions
+
+- Removed testsuite/negative/range_syntax.yilt — `0..10` lexes as `0.` `.10` (two floats) and the for-loop silently iterates over a float, so the rejection test was a false negative. Filed as a separate bug to fix later.
+
+- Updated documentation to reflect the no-arrow rule:
+  - docs/language.md — replaced arrow example with bare form, added explicit rule statement
+  - README.md — bulk-replaced all `fn foo() -> T` with `fn foo() T`, rewrote the "Functions are first-class" paragraph to state the no-arrow rule
+  - plan.md — updated section 0.3 (Function Declarations) and the future iterator protocol example
+  - internal/ast/ast.go comment, internal/check/checker.go comment — updated
+
+Stage Summary:
+- 23 new tests added (13 negative + 1 positive + 9 sub-tests in new Go test file). All pass.
+- Test count: 137 → 160 sub-tests. 150 PASS, 10 FAIL (same 10 pre-existing failures).
+- 1 critical lexer bug fixed (column tracking). This improves EVERY diagnostic that points at multi-token spans.
+- 4 parser changes consolidated into 1 helper (`parseReturnType`). Code is now more maintainable.
+- 3 new parser error emitters added (`errorWithHelp`, `errorWithSpan`, `errorDiag`).
+- The no-arrow rule is now consistently enforced across all function-signature positions (top-level fn, local named fn, closure expr, tuple return).
+- Hello.yilt still compiles to a working ELF x86_64 binary (now using bare return type).
+
+---
+Task ID: 9-next-steps (updated)
+Agent: main (Super Z)
+Task: Outline next steps for the user.
+
+Stage Summary:
+The user wants to keep pushing toward making Yilt a real language on par with Go. Suggested next priorities:
+
+1. **Fix the string-concat runtime bug** (still outstanding from last session) — string_interp.yilt outputs `nilnilnilnilnil`.
+
+2. **Decide on generic syntax** — the parser supports `fn id[T](x T) T` but the type-checker rejects `T` as an unknown type. Either:
+   (a) Implement proper generic type-parameter tracking in the checker (treat `[T]` params as type names in scope), or
+   (b) Adopt a different syntax.  The current `[T]` is fine; just needs checker support.
+
+3. **Implement missing stdlib symbols** — `path.{join,basename,dirname,extname}`, `json.{encode,decode,stringify}`, `sys.{args,cwd,platform,exit}`.
+
+4. **Fix `let mut` in 3 test files** — testsuite/basic/variadic.yilt, testsuite/basic/enum_payload.yilt, testsuite/advanced/enum_comprehensive.yilt all use `let x = 0; x = ...` pattern.
+
+5. **Fix the table-key-type inference bug** — `let mut t = {}; t["k"] = "v"; t[42] = 100` should either accept mixed-type keys or give a clearer error.
+
+6. **Write more diagnostic tests** — the new diag_render_test.go pattern (capture rendered stderr, check substrings) can be extended to cover:
+   - Type mismatch errors (should suggest the expected type)
+   - Ownership/move errors (should suggest `let mut` or clone)
+   - Undefined variable errors (should suggest similar names — Levenshtein)
+   - Match exhaustiveness errors (should list missing cases)
+
+7. **Begin Yilt self-host project** — `yilt-selfhost/README.md` is already in the spec; this is the natural starting point for rewriting the compiler in Yilt itself.

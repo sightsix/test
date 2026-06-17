@@ -1,0 +1,5 @@
+// Negative: C-style for loop is rejected; use while or for-in instead.
+fn main()
+    let mut i = 0
+    for (i = 0; i < 10; i++)
+        print(i)

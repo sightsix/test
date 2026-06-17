@@ -1,0 +1,8 @@
+// Negative: arrow syntax on a tuple return is rejected too — use bare parens.
+fn pair() -> (int, str)
+    return (1, "hi")
+
+fn main()
+    let (n, s) = pair()
+    print(n)
+    print(s)

@@ -95,7 +95,20 @@ func (l *Lexer) Tokenize() ([]Token, []IndentToken) {
                         }
                 }
 
+                offAtLexStart := l.pos
                 l.lexToken()
+                // After lexing a token, advance l.col by the number of bytes
+                // the lexer just consumed (l.pos - offAtLexStart).  This
+                // keeps l.col in sync with l.pos so the NEXT token gets the
+                // correct starting column.
+                //
+                // Previously l.col was only updated for whitespace and
+                // newlines, which caused every token after the first one on
+                // a line to be reported with the wrong column — and that
+                // made every multi-token diagnostic point at the wrong place.
+                if l.pos > offAtLexStart {
+                        l.col += l.pos - offAtLexStart
+                }
         }
 
         // Emit remaining dedents

@@ -10,7 +10,7 @@ it ideal for systems programming, scripting, and embedded targets.
 go build -o yiltc ./cmd/yiltc/
 
 # Compile and run
-echo 'fn main() -> int
+echo 'fn main() int
     print("Hello from Yilt!")
     return 0' > hello.yilt
 yiltc hello.yilt && ./hello
@@ -22,7 +22,7 @@ yiltc -t rv32+bare -o firmware input.yilt
 
 Language Tour
 Hello World
-fn main() -> int
+fn main() int
     print("Hello, World!")
     return 0
 Yilt uses indentation-based blocks (4 spaces), similar to Python. No
@@ -45,7 +45,7 @@ table (hash map), gen (generic), and
 void (internal).
 Functions
 // Function with return type (arrow syntax)
-fn add(a int, b int) -> int
+fn add(a int, b int) int
     return a + b
 
 // Return type without arrow (also valid)
@@ -61,7 +61,7 @@ fn greet(name str)
     print(f"Hello, {name}!")
 
 // Recursive functions
-fn factorial(n int) -> int
+fn factorial(n int) int
     if n <= 1
         return 1
     return n * factorial(n - 1)
@@ -72,8 +72,12 @@ fn main()
     print(factorial(5)) // 120
     print(double(6))    // 12
 Functions are first-class values. Yilt automatically infers return
-types when not annotated. Both fn foo() -> int and
-fn foo() int are valid return type declarations.
+types when not annotated.  Function return types use a BARE type
+name after the closing paren: `fn foo() int`.  The arrow form
+`fn foo() -> int` is REJECTED — Yilt enforces this rule to keep
+function-signature parsing consistent with parameter syntax
+(`name type`, not `name: type` or `name -> type`).  Tuple returns
+use bare parens: `fn foo() (int, str)`.
 String Interpolation
 fn main()
     let name = "Yilt"
@@ -166,12 +170,12 @@ fn demo()
     print(s.split(", "))         // ["  Hello", "World  "]
     print("ha".repeat(3))        // "hahaha"
 Error Handling
-fn divide(a int, b int) -> int
+fn divide(a int, b int) int
     if b == 0
         error("division by zero")
     return a / b
 
-fn safe_divide(a int, b int) -> int
+fn safe_divide(a int, b int) int
     let result = divide(a, b)?
     return result
 
@@ -182,7 +186,7 @@ The ? operator propagates errors upward. Use
 error("msg") to create error values, and expr?
 to early-return from the current function on error.
 Concurrency
-fn compute(n int) -> int
+fn compute(n int) int
     return n * 2
 
 fn main()
@@ -264,7 +268,7 @@ Compiled input -> input (x86_64-linux-gnu, elf64) in 1.53ms
 
 Type System
 Type Annotations
-fn add(a int, b int) -> int
+fn add(a int, b int) int
     return a + b
 
 fn demo()

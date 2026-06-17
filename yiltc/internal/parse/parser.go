@@ -42,6 +42,10 @@ type ParseError struct {
         Col    int
         Offset int
         Msg    string
+        // Help is an optional suggestion shown under the error as "= help: ...".
+        Help string
+        // SpanLen is the length of the underline; 0 means 1 (single char).
+        SpanLen int
 }
 
 func (e ParseError) Error() string {
@@ -233,6 +237,41 @@ func (p *Parser) parseTypeArgs() []ast.TypeRef {
         return args
 }
 
+// parseReturnType parses an optional return type after the closing ')' of
+// a function signature.  Enforces the no-arrow rule: `-> int` is rejected
+// with a diagnostic suggesting the bare form `int`.  Returns the parsed
+// return type (retType, retTypes) — either a single type or a tuple.
+//
+// Both retType and retTypes may be nil/empty if no return type is present.
+func (p *Parser) parseReturnType() (retType *ast.TypeRef, retTypes []ast.TypeRef) {
+        if p.peek().Kind == ast.TArrow {
+                // Reject `->` and offer the bare-form fix.
+                arrowTok := p.peek()
+                p.errorDiag(arrowTok, 2,
+                        "arrow syntax '->' is not allowed for function return types",
+                        "Yilt uses a bare type after ')': write 'fn foo() int' instead of 'fn foo() -> int'")
+                p.advance() // consume the arrow so parsing can continue
+                // Still parse the (now-expectable) return type so downstream
+                // phases have something to work with and we don't cascade.
+                if p.peek().Kind == ast.TLParen {
+                        retTypes = p.parseTupleType()
+                } else if p.peek().Kind == ast.TIdent && p.isTypeName(p.peek().Value) {
+                        retType = p.parseTypeRef()
+                }
+                return retType, retTypes
+        }
+        if p.peek().Kind == ast.TLParen {
+                // Bare tuple return type: fn foo() (int, str)
+                retTypes = p.parseTupleType()
+                return nil, retTypes
+        }
+        if p.peek().Kind == ast.TIdent && p.isTypeName(p.peek().Value) {
+                retType = p.parseTypeRef()
+                return retType, nil
+        }
+        return nil, nil
+}
+
 func (p *Parser) parseFnDecl(pub bool) *ast.FnDecl {
         pos := p.posAST()
 
@@ -261,20 +300,12 @@ func (p *Parser) parseFnDecl(pub bool) *ast.FnDecl {
         params := p.parseParams()
         p.expect(ast.TRParen)
 
-        // Return type (optional) — only accept known type keywords or -> arrow
-        var retType *ast.TypeRef
-        var retTypes []ast.TypeRef
-        if p.peek().Kind == ast.TArrow {
-                p.advance()
-                // Check for tuple return type: -> (int, str)
-                if p.peek().Kind == ast.TLParen {
-                        retTypes = p.parseTupleType()
-                } else {
-                        retType = p.parseTypeRef()
-                }
-        } else if p.peek().Kind == ast.TIdent && p.isTypeName(p.peek().Value) {
-                retType = p.parseTypeRef()
-        }
+        // Return type (optional) — bare type name only.
+        // Yilt enforces a NO-ARROW rule: function return types are written
+        // as a bare type after the closing paren, e.g. `fn foo() int`.
+        // The arrow form `fn foo() -> int` is rejected with a diagnostic
+        // that suggests the bare form.  See parseReturnType for the logic.
+        retType, retTypes := p.parseReturnType()
 
         fn := &ast.FnDecl{
                 Name:       name.Value,
@@ -1652,19 +1683,8 @@ func (p *Parser) parseLocalFn() ast.Stmt {
         params := p.parseParams()
         p.expect(ast.TRParen)
 
-        // Optional return type
-        var retType *ast.TypeRef
-        var retTypes []ast.TypeRef
-        if p.peek().Kind == ast.TArrow {
-                p.advance()
-                if p.peek().Kind == ast.TLParen {
-                        retTypes = p.parseTupleType()
-                } else {
-                        retType = p.parseTypeRef()
-                }
-        } else if p.peek().Kind == ast.TIdent && p.isTypeName(p.peek().Value) {
-                retType = p.parseTypeRef()
-        }
+        // Optional return type — bare type name only (no arrow, see parseReturnType).
+        retType, retTypes := p.parseReturnType()
 
         // Parse body
         body := p.parseBlock()
@@ -1698,19 +1718,8 @@ func (p *Parser) parseFnExpr() ast.Expr {
         params := p.parseParams()
         p.expect(ast.TRParen)
 
-        // Optional return type
-        var retType *ast.TypeRef
-        var retTypes []ast.TypeRef
-        if p.peek().Kind == ast.TArrow {
-                p.advance()
-                if p.peek().Kind == ast.TLParen {
-                        retTypes = p.parseTupleType()
-                } else {
-                        retType = p.parseTypeRef()
-                }
-        } else if p.peek().Kind == ast.TIdent && p.isTypeName(p.peek().Value) {
-                retType = p.parseTypeRef()
-        }
+        // Optional return type — bare type name only (no arrow, see parseReturnType).
+        retType, retTypes := p.parseReturnType()
 
         // Parse body
         body := p.parseBlock()
@@ -2021,6 +2030,47 @@ func (p *Parser) error(tok lex.Token, msg string) {
                 Col:    tok.Col,
                 Offset: tok.Offset,
                 Msg:    msg,
+        })
+}
+
+// errorWithHelp emits a parse error with an attached "= help: ..." suggestion.
+// The help string is shown beneath the error in the diagnostic render.
+func (p *Parser) errorWithHelp(tok lex.Token, msg, help string) {
+        p.errors = append(p.errors, ParseError{
+                File:   p.file,
+                Line:   tok.Line,
+                Col:    tok.Col,
+                Offset: tok.Offset,
+                Msg:    msg,
+                Help:   help,
+        })
+}
+
+// errorWithSpan emits a parse error with an explicit underline span length.
+// Use this when the error pertains to a multi-character token (e.g., the
+// 2-character `->` arrow) so the underline covers the whole token.
+func (p *Parser) errorWithSpan(tok lex.Token, spanLen int, msg string) {
+        p.errors = append(p.errors, ParseError{
+                File:    p.file,
+                Line:    tok.Line,
+                Col:     tok.Col,
+                Offset:  tok.Offset,
+                Msg:     msg,
+                SpanLen: spanLen,
+        })
+}
+
+// errorDiag emits a parse error with both a span length (for the underline)
+// AND a help suggestion.  This is the most informative form.
+func (p *Parser) errorDiag(tok lex.Token, spanLen int, msg, help string) {
+        p.errors = append(p.errors, ParseError{
+                File:    p.file,
+                Line:    tok.Line,
+                Col:     tok.Col,
+                Offset:  tok.Offset,
+                Msg:     msg,
+                Help:    help,
+                SpanLen: spanLen,
         })
 }
 

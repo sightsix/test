@@ -483,7 +483,7 @@ type (
                 TypeParams []string  // generic type parameters, e.g. [T, U]
                 Params     []Param
                 ReturnType *TypeRef  // nil = void
-                RetTypes   []TypeRef // multi-return: e.g. fn foo() -> (int, str)
+                RetTypes   []TypeRef // multi-return: e.g. fn foo() (int, str)  [bare, no arrow]
                 Body       []Stmt
                 Public     bool
                 Extern     bool

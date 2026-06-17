@@ -301,7 +301,18 @@ func run(args []string) int {
         file := parser.ParseFile()
         if len(parser.Errors()) > 0 {
                 for _, pe := range parser.Errors() {
-                        dh.Error(pe.File, pe.Line, pe.Col, pe.Offset, pe.Msg)
+                        if pe.Help != "" {
+                                if pe.SpanLen > 1 {
+                                        dh.ErrorfSpan(pe.File, pe.Line, pe.Col, pe.Offset, pe.SpanLen, "%s", pe.Msg)
+                                } else {
+                                        dh.Errorf(pe.File, pe.Line, pe.Col, pe.Offset, "%s", pe.Msg)
+                                }
+                                dh.Help(pe.Help)
+                        } else if pe.SpanLen > 1 {
+                                dh.ErrorSpan(pe.File, pe.Line, pe.Col, pe.Offset, pe.SpanLen, pe.Msg)
+                        } else {
+                                dh.Error(pe.File, pe.Line, pe.Col, pe.Offset, pe.Msg)
+                        }
                 }
         }
         if dh.HasErrors() {
@@ -369,7 +380,18 @@ func run(args []string) int {
                                 depFile := depParser.ParseFile()
                                 if len(depParser.Errors()) > 0 {
                                         for _, pe := range depParser.Errors() {
-                                                dh.Error(pe.File, pe.Line, pe.Col, pe.Offset, pe.Msg)
+                                                if pe.Help != "" {
+                                                        if pe.SpanLen > 1 {
+                                                                dh.ErrorfSpan(pe.File, pe.Line, pe.Col, pe.Offset, pe.SpanLen, "%s", pe.Msg)
+                                                        } else {
+                                                                dh.Errorf(pe.File, pe.Line, pe.Col, pe.Offset, "%s", pe.Msg)
+                                                        }
+                                                        dh.Help(pe.Help)
+                                                } else if pe.SpanLen > 1 {
+                                                        dh.ErrorSpan(pe.File, pe.Line, pe.Col, pe.Offset, pe.SpanLen, pe.Msg)
+                                                } else {
+                                                        dh.Error(pe.File, pe.Line, pe.Col, pe.Offset, pe.Msg)
+                                                }
                                         }
                                 }
                                 if dh.HasErrors() {

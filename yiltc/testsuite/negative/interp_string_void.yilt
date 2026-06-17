@@ -1,5 +1,5 @@
 // Interpolating a function reference in string should fail
-fn helper() -> int
+fn helper() int
     return 42
 fn main()
     let x = f"{helper}"

@@ -52,7 +52,19 @@ func compileFile(t *testing.T, path string) compileResult {
         parser := parse.New(absPath, tokens, indents, src)
         file := parser.ParseFile()
         for _, pe := range parser.Errors() {
-                dh.Error(pe.File, pe.Line, pe.Col, pe.Offset, pe.Msg)
+                if pe.Help != "" {
+                        // Use Errorf + Help so the suggestion renders nicely.
+                        if pe.SpanLen > 1 {
+                                dh.ErrorfSpan(pe.File, pe.Line, pe.Col, pe.Offset, pe.SpanLen, "%s", pe.Msg)
+                        } else {
+                                dh.Errorf(pe.File, pe.Line, pe.Col, pe.Offset, "%s", pe.Msg)
+                        }
+                        dh.Help(pe.Help)
+                } else if pe.SpanLen > 1 {
+                        dh.ErrorSpan(pe.File, pe.Line, pe.Col, pe.Offset, pe.SpanLen, pe.Msg)
+                } else {
+                        dh.Error(pe.File, pe.Line, pe.Col, pe.Offset, pe.Msg)
+                }
         }
         result.declCnt = len(file.Decls)
         result.parseOK = !dh.HasErrors()

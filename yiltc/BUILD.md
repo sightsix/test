@@ -80,8 +80,9 @@ The spec contains 6 inconsistencies between the test programs and the
 implementation. See `/home/z/my-project/worklog.md` for the full list.
 Quick summary:
 
-1. **Generic function syntax** — test files use `fn id[T](x T) T` but parser
-   doesn't support `[T]`. (3 tests fail.)
+1. **Generic function syntax** — `fn id[T](x T) T` parses but the type
+   checker rejects `T` as unknown.  Needs generic type-param tracking.
+   (3 tests fail.)
 2. **`let mut` strictness** — test files use `let x = 0; x = ...` but
    checker correctly rejects (test files need `let mut`). (3 tests fail.)
 3. **Missing stdlib symbols** — `path.*`, `json.*`, `sys.*` not all
@@ -90,6 +91,18 @@ Quick summary:
    later int keys. (1 test fails.)
 5. **String `+` runtime bug** — string concatenation produces `nil` at
    runtime. (string_interp.yilt outputs `nilnilnilnilnil`.)
-6. **Spec line-count drift** — 3 .md files have wrong declared line counts.
 
-Test pass rate: **127/137 (93%)**. All ELF x86_64 end-to-end tests pass.
+Test pass rate: **150/160 (94%)**. All ELF x86_64 end-to-end tests pass.
+
+## Language rule changes (this session)
+
+- **No-arrow rule enforced**: `fn foo() -> int` is now a parse error.
+  Use `fn foo() int` instead.  Tuple returns use bare parens:
+  `fn foo() (int, str)`.  See `testsuite/negative/arrow_*.yilt` for
+  the 4 negative tests covering all function-signature positions.
+- **Lexer column tracking fixed**: every token now reports its correct
+  source column.  Previously only the first token on a line had the
+  right column, which broke all multi-token diagnostic underlines.
+- **Parser error infrastructure extended**: `ParseError` now supports
+  `Help` and `SpanLen` fields, rendered as `= help: ...` lines and
+  multi-character `^^` underlines respectively.

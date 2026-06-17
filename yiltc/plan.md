@@ -42,13 +42,13 @@ let x: int = 1.
 fn main()                             // no return type
 fn add(x, y)                          // untyped params
 fn add(x int, y int) int              // typed params, bare return type
-fn add(x int, y int) -> int           // arrow return type (also valid)
-fn multi() -> (int, str)              // tuple return (only with ->)
+fn multi() (int, str)                 // tuple return (bare parens, NO arrow)
 fn no_ret() void                      // explicit void return
 pub fn exported(a int) int            // public function
 extern fn c_func(a int)               // FFI declaration (no body)
 Parameters: name type, NOT name: type.
-Return type: bare name after ) or -> type.
+Return type: bare name after ).  The arrow form `-> type` is
+REJECTED (see testsuite/negative/arrow_return_type.yilt).
 pub comes BEFORE fn. extern comes
 AFTER fn.
 0.4 Operators
@@ -1210,7 +1210,7 @@ std/
 +-- collections.yilt   -- List, Set, Queue, Stack, HashMap
 8.3 Iterator Protocol (Future)
 // Any type implementing `next()` can be iterated with `for`
-fn next() -> (val, bool)     // (value, has_more)
+fn next() (val, bool)     // (value, has_more)
 
 9. Phase 6: Tooling
 9.1 Language Server (LSP)

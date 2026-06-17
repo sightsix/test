@@ -1,0 +1,8 @@
+[error] /tmp/show_diag.yilt:1:22: arrow syntax '->' is not allowed for function return types
+1 | fn add(a int, b int) -> int
+ |                      ^^
+2 |     return a + b
+  = help: Yilt uses a bare type after ')': write 'fn foo() int' instead of 'fn foo() -> int'
+
+  Aborted: 1 error, 0 warnings
+  For help, run: yiltc --help

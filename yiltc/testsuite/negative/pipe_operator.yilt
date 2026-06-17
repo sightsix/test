@@ -1,0 +1,4 @@
+// Negative: pipe operator `|>` is not supported.
+fn main()
+    let x = 5
+    let y = x |> double |> print

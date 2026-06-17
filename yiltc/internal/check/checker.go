@@ -951,7 +951,7 @@ func (c *Checker) registerFn(file string, fn *ast.FnDecl) {
         if fn.ReturnType != nil {
                 retType = c.resolveType(fn.ReturnType)
         }
-        // Handle tuple return types: fn foo() -> (int, str)
+        // Handle tuple return types: fn foo() (int, str)  [bare, no arrow]
         if len(fn.RetTypes) > 0 {
                 elemTypes := make([]*TypeDesc, len(fn.RetTypes))
                 for i, rt := range fn.RetTypes {

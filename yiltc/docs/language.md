@@ -21,13 +21,14 @@ Creates a mutable binding.
 let mut total = 0
 fn
 Defines a function.
-fn add(a int, b int) -> int
+fn add(a int, b int) int
   return a + b
 Notes: - Functions are top-level only. - Nested functions are
-rejected. - Return type is optional (use -> ret or just
-name the type after ); omit for no return value). -
-Parameter names are required. - Parameter types may be omitted and will
-be inferred.
+rejected. - Return type is optional (use a bare type name after
+); omit for no return value).  The arrow form `-> int` is
+REJECTED — see negative/arrow_return_type.yilt.  Tuple returns
+use bare parens: `fn pair() (int, str)`. - Parameter names are
+required. - Parameter types may be omitted and will be inferred.
 extern fn
 Declares a foreign function with no Yilt body.
 pub extern fn rand() int

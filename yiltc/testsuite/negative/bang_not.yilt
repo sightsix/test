@@ -1,0 +1,5 @@
+// Negative: ! prefix for logical negation is rejected; use `not` keyword.
+fn main()
+    let x = true
+    if !x
+        print("nope")
