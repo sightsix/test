@@ -1,0 +1,13 @@
+fn main()
+    print("hello")
+    print("world")
+    print(42)
+    print(true)
+    print(nil)
+
+    let x = 10
+    let y = 20
+    print(x + y)
+
+    let s = "test"
+    print(s)

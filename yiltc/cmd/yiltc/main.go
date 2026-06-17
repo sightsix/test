@@ -3745,6 +3745,7 @@ func addRuntimeSymbols(lnk link.Linker) {
                 "y_trim", "y_lower", "y_upper", "y_substr",
                 "y_contains", "y_starts_with", "y_ends_with", "y_find",
                 "y_sys_args", "y_sys_cwd", "y_sys_platform", "y_sys_env", "y_sys_exit",
+                "y_sys_write", "y_sys_open", "y_sys_close",
                 "y_fs_exists", "y_fs_read_text", "y_fs_write_text", "y_fs_append_text",
                 "y_fs_read_lines", "y_fs_remove", "y_fs_rename", "y_fs_copy",
                 "y_fs_mkdir", "y_fs_rmdir", "y_fs_read_dir",

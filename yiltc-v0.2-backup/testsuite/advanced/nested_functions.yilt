@@ -1,0 +1,20 @@
+fn main()
+    fn inner()
+        return 42
+    let a = inner()
+
+    fn make_counter()
+        let mut count = 0
+        fn increment()
+            count = count + 1
+            return count
+        return increment
+
+    let c = make_counter()
+    let a1 = c()
+    let a2 = c()
+    let a3 = c()
+
+    let counter = make_counter()
+    let b1 = counter()
+    let b2 = counter()

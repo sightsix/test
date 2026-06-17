@@ -1,0 +1,10 @@
+// Test: tuple return types using the bare (no-arrow) form.
+//   fn pair() (int, str)   ← correct
+//   fn pair() -> (int, str) ← rejected (see negative/arrow_tuple_return.yilt)
+fn pair() (int, str)
+    return (42, "hello")
+
+fn main()
+    let (n, s) = pair()
+    print(n)
+    print(s)

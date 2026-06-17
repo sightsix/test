@@ -1,0 +1,16 @@
+fn main()
+    let t = true
+    let f = false
+
+    let a = t and t
+    let b = t and f
+    let c = f or t
+    let d = f or f
+    let e = not t
+    let ff = not f
+
+    let eq = t == true
+    let neq = f != true
+
+    let result = t == f
+    let result2 = t != f

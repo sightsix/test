@@ -1,0 +1,9 @@
+// Negative: `else if` is rejected; use `but` for else-if chains.
+fn main()
+    let x = 5
+    if x > 10
+        print("big")
+    else if x > 5
+        print("medium")
+    else
+        print("small")

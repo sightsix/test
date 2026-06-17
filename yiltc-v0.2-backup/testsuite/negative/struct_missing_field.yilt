@@ -1,0 +1,8 @@
+// Negative test: missing struct field initialization should produce warning
+struct Point
+    mut x int
+    mut y int
+
+fn main()
+    let p = Point{x: 10}
+    print(p.x)

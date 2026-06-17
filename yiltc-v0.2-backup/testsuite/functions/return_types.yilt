@@ -1,0 +1,13 @@
+// Testing annotated return type validation.
+fn returns_int() int
+    return 42
+
+fn returns_str() str
+    return "hello"
+
+fn returns_inferred()
+    return 100
+
+fn inferred_from_body()
+    let x = 10
+    return x + 20

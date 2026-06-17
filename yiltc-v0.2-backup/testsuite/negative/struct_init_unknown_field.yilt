@@ -1,0 +1,7 @@
+// Initializing a struct with a field that doesn't exist should error
+struct Point
+    x int
+    y int
+
+fn main()
+    let p = Point{x: 10, y: 20, z: 30}

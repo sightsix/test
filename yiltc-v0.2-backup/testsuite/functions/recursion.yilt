@@ -1,0 +1,27 @@
+fn main()
+    let a = factorial(10)
+    let b = fib(15)
+    let c = gcd(48, 18)
+    let d = power(2, 16)
+
+fn factorial(n)
+    if n <= 1
+        return 1
+    return n * factorial(n - 1)
+
+fn fib(n)
+    if n <= 0
+        return 0
+    if n == 1
+        return 1
+    return fib(n - 1) + fib(n - 2)
+
+fn gcd(a, b)
+    if b == 0
+        return a
+    return gcd(b, a % b)
+
+fn power(base, exp)
+    if exp == 0
+        return 1
+    return base * power(base, exp - 1)

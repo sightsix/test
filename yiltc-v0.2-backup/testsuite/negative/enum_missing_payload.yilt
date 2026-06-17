@@ -1,0 +1,9 @@
+// Negative test: missing required payload on a payload variant
+
+enum Result
+    Ok(int)
+    Err(str)
+
+pub fn main()
+    let r = Result.Ok
+    print(r)

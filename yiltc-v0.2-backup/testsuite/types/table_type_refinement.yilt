@@ -1,0 +1,18 @@
+// Test: table type refinement on index assignment
+// When an empty table is assigned to with concrete types, the binding's
+// type should be refined so subsequent reads have type information.
+
+fn main()
+    // Test 1: empty table, string keys, int values
+    let mut t = {}
+    t["a"] = 1
+    t["b"] = 2
+    println(t["a"])
+    println(t["b"])
+
+    // Test 2: empty table with int keys
+    let mut m = {}
+    m[1] = "one"
+    m[2] = "two"
+    println(m[1])
+    println(m[2])

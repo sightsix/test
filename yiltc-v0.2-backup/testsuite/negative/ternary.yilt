@@ -1,0 +1,5 @@
+// Negative: ternary conditional expression `?:` is not supported.
+fn main()
+    let x = 5
+    let label = x > 3 ? "big" : "small"
+    print(label)

@@ -1,0 +1,4 @@
+// Testing assignment to typed variable with wrong type.
+fn bad()
+    let mut x int = 10
+    x = "not an int"

@@ -1,0 +1,8 @@
+// Accessing a field that doesn't exist on the struct should error
+struct Point
+    x int
+    y int
+
+fn main()
+    let p = Point{x: 10, y: 20}
+    print(p.z)

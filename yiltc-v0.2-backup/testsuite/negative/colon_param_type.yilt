@@ -1,0 +1,8 @@
+// Negative: colon-style parameter type annotation is rejected.
+//   Wrong: fn add(a: int, b: int) int
+//   Right: fn add(a int, b int) int
+fn add(a: int, b: int) int
+    return a + b
+
+fn main()
+    print(add(1, 2))

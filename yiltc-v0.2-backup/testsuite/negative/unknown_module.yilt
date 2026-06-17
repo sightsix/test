@@ -1,0 +1,5 @@
+// Test importing a module that doesn't exist
+use nonexistent_module
+
+fn main()
+    print(1)

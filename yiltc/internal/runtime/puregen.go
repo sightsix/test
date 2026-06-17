@@ -1603,6 +1603,93 @@ func genPure_SysSleep(rd *rodataBuilder) puregenFunc {
         return fb.finalize()
 }
 
+// genPure_SysWrite: y_sys_write(fd: tagged_int, data: tagged_str, len: tagged_int) → tagged_int
+//
+// Writes `len` bytes from the string `data` to file descriptor `fd`.
+// Returns the number of bytes written (or negative error).
+//
+// C equivalent:
+//   ssize_t write(int fd, const void *buf, size_t count);
+func genPure_SysWrite(rd *rodataBuilder) puregenFunc {
+        fb := newRtFuncBuilder("y_sys_write", rd)
+        a := fb.a
+
+        // RDI = fd (tagged int), RSI = data (tagged str), RDX = len (tagged int)
+        // Extract fd: sign-extend 56-bit payload from RDI
+        fb.getInt(x86_64.RDI, x86_64.RDI)
+
+        // Extract data pointer from RSI (tagged str)
+        fb.getPtr(x86_64.RSI, x86_64.RSI)
+        // Add header size to get to the actual data
+        a.AddRI(x86_64.RSI, rtStrHeaderSize)
+
+        // Extract len: sign-extend 56-bit payload from RDX
+        fb.getInt(x86_64.RDX, x86_64.RDX)
+
+        // syscall(SYS_write, fd, buf, count)
+        a.MovRM(x86_64.RAX, sysWrite)
+        a.SYSCALL()
+
+        // Tag the return value as int
+        fb.mkTag(rtTagInt, x86_64.RAX, x86_64.RAX)
+        a.RET()
+
+        return fb.finalize()
+}
+
+// genPure_SysOpen: y_sys_open(path: tagged_str, flags: tagged_int, mode: tagged_int) → tagged_int
+//
+// Opens a file. Returns file descriptor (tagged int) or negative error.
+//
+// C equivalent:
+//   int open(const char *pathname, int flags, mode_t mode);
+func genPure_SysOpen(rd *rodataBuilder) puregenFunc {
+        fb := newRtFuncBuilder("y_sys_open", rd)
+        a := fb.a
+
+        // RDI = path (tagged str), RSI = flags (tagged int), RDX = mode (tagged int)
+        // Extract path pointer
+        fb.getPtr(x86_64.RDI, x86_64.RDI)
+        a.AddRI(x86_64.RDI, rtStrHeaderSize)
+
+        // Extract flags
+        fb.getInt(x86_64.RSI, x86_64.RSI)
+
+        // Extract mode
+        fb.getInt(x86_64.RDX, x86_64.RDX)
+
+        // syscall(SYS_open, path, flags, mode)  — SYS_open=2 on x86_64
+        a.MovRM(x86_64.RAX, 2) // SYS_open
+        a.SYSCALL()
+
+        // Tag the return value as int
+        fb.mkTag(rtTagInt, x86_64.RAX, x86_64.RAX)
+        a.RET()
+
+        return fb.finalize()
+}
+
+// genPure_SysClose: y_sys_close(fd: tagged_int) → tagged_int
+//
+// Closes a file descriptor. Returns 0 on success, negative on error.
+func genPure_SysClose(rd *rodataBuilder) puregenFunc {
+        fb := newRtFuncBuilder("y_sys_close", rd)
+        a := fb.a
+
+        // Extract fd
+        fb.getInt(x86_64.RDI, x86_64.RDI)
+
+        // syscall(SYS_close, fd)  — SYS_close=3 on x86_64
+        a.MovRM(x86_64.RAX, 3) // SYS_close
+        a.SYSCALL()
+
+        // Tag the return value as int
+        fb.mkTag(rtTagInt, x86_64.RAX, x86_64.RAX)
+        a.RET()
+
+        return fb.finalize()
+}
+
 // genPure_SysArgs: y_sys_args() → tagged
 // Stub — matches C runtime (returns nil).
 func genPure_SysArgs(rd *rodataBuilder) puregenFunc {
@@ -1938,6 +2025,9 @@ func init() {
                 genPure_Eprint,          // y_eprint (prints to stderr)
                 genPure_Eprintln,        // y_eprintln (calls y_eprint via PLT32)
                 genPure_SysExit,         // y_sys_exit
+                genPure_SysWrite,        // y_sys_write (raw file write)
+                genPure_SysOpen,         // y_sys_open (raw file open)
+                genPure_SysClose,        // y_sys_close (raw file close)
                 genPure_Copy,            // y_copy
                 genPure_Promote,         // y_promote
                 genPure_Neg,             // y_neg

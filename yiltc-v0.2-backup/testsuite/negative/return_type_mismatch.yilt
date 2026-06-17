@@ -1,0 +1,3 @@
+// Return type mismatch: declared int but return str.
+fn bad() int
+    return "not an int"

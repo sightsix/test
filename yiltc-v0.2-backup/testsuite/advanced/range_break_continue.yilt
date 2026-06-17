@@ -1,0 +1,22 @@
+// Range-for with break and continue
+fn main()
+    // break out of range loop
+    for i in 0..10
+        if i == 5
+            break
+        print(i)
+
+    // continue in range loop
+    for i in 0..6
+        if i == 3
+            continue
+        print(i)
+
+    // nested loops with break
+    let mut count = 0
+    for i in 0..4
+        for j in 0..4
+            count = count + 1
+            if j == 2
+                break
+    print(count)

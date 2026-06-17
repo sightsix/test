@@ -1,0 +1,4 @@
+// Negative: `var` keyword does not exist in Yilt; use `let mut` instead.
+fn main()
+    var x = 42
+    print(x)

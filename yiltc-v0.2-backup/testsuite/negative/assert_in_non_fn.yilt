@@ -1,0 +1,2 @@
+// assert at top level (outside any function) should fail
+assert true

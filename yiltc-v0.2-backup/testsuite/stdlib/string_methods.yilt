@@ -1,0 +1,12 @@
+fn main()
+    let s = "  hello world  "
+    let t = s.trim()
+    let u = "hello".upper()
+    let l = "HELLO".lower()
+    let sub = "hello world".substr(0, 5)
+    let c = "hello".contains("ell")
+    let sw = "hello".starts_with("hel")
+    let ew = "hello".ends_with("llo")
+    let idx = "hello".find("ll")
+    let parts = "a,b,c".split(",")
+    let to_i = "42".to_int()

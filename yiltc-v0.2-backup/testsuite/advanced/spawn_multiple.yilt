@@ -1,0 +1,12 @@
+fn main()
+    let h1 = spawn add(10, 20)
+    let h2 = spawn mul(3, 7)
+    let a = await h1
+    let b = await h2
+    let c = a + b
+
+fn add(x, y)
+    return x + y
+
+fn mul(x, y)
+    return x * y

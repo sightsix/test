@@ -1,0 +1,11 @@
+fn main()
+    let abs_val = abs(-42)
+    let sqrt_val = sqrt(16)
+    let min_val = min(3, 7)
+    let max_val = max(3, 7)
+
+    let a = abs(-3.14)
+    let b = sqrt(2.0)
+    let c = floor(3.7)
+    let d = ceil(3.2)
+    let e = round(3.5)

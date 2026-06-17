@@ -1,0 +1,9 @@
+// Negative test: spread used with non-variadic function
+
+fn add(a int, b int) int
+    return a + b
+
+pub fn main()
+    let args = {0: 1, 1: 2}
+    let result = add(...args)
+    print(result)

@@ -1,0 +1,5 @@
+// Negative: arrow syntax on a closure (local function expression) is also rejected.
+fn main()
+    let f = fn(x int) -> int
+        return x + 1
+    print(f(10))

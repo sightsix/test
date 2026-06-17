@@ -1,0 +1,55 @@
+// Test struct method dispatch via naming convention
+// Functions named "StructName_methodname" with the struct as first param
+// can be called as obj.methodname(args)
+
+struct Point
+    mut x int
+    mut y int
+
+fn Point_get_x(self Point) int
+    return self.x
+
+fn Point_get_y(self Point) int
+    return self.y
+
+fn Point_sum(self Point, other Point) int
+    return self.x + other.x + self.y + other.y
+
+fn Point_translate(mut self Point, dx int, dy int)
+    self.x = self.x + dx
+    self.y = self.y + dy
+
+fn Point_clone(self Point) Point
+    return Point{x: self.x, y: self.y}
+
+fn Point_double(self Point) Point
+    return Point{x: self.x + self.x, y: self.y + self.y}
+
+fn main()
+    // --- Basic getters ---
+    let p1 = Point{x: 10, y: 20}
+    assert p1.get_x() == 10
+    assert p1.get_y() == 20
+
+    // --- Method with second struct argument ---
+    let p2 = Point{x: 30, y: 40}
+    assert p1.sum(p2) == 100
+
+    // --- Mutable method ---
+    let mut p3 = Point{x: 100, y: 200}
+    p3.translate(1, 2)
+    assert p3.x == 101
+    assert p3.y == 202
+
+    // --- Struct-returning method ---
+    let p4 = p3.clone()
+    assert p4.x == 101
+    assert p4.y == 202
+
+    // --- Method returning new struct ---
+    let p5 = Point{x: 5, y: 7}
+    let p6 = p5.double()
+    assert p6.x == 10
+    assert p6.y == 14
+
+    println("all tests passed")

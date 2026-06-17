@@ -1,0 +1,11 @@
+// Negative test: binding a variable on a variant with no payload
+enum Color
+    Red
+    Green
+    Blue
+
+fn main()
+    let c = Color.Red
+    match c
+        case Color.Red(x)
+            println(x)

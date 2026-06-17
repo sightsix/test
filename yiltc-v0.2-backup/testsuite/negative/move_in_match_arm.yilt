@@ -1,0 +1,10 @@
+// Move in one match arm, then use after merge — should error
+fn main()
+    let a = {"k": 1}
+    let x = 1
+    match x
+        case 1
+            let b = a
+        default
+            print(a)
+    print(a)

@@ -1,0 +1,3 @@
+// Using a keyword as an identifier should fail at the lexer/parser level
+fn main()
+    let fn = 42

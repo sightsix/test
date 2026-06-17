@@ -1,0 +1,12 @@
+// Table iteration and built-in function tests
+fn main()
+    let nums = {0: 10, 1: 20, 2: 30}
+    let mut total = 0
+
+    for k, v in nums
+        total = total + v
+    print(total)
+
+    print(len(nums))
+    print(has(nums, 1))
+    print(has(nums, 99))

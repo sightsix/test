@@ -1,0 +1,6 @@
+// Negative test: table index assign with wrong value type.
+// Table has int values from literal, but we try to assign a string.
+
+fn main()
+    let mut t = {"a": 1, "b": 2}
+    t["c"] = "wrong"

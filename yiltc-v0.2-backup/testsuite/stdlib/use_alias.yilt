@@ -1,0 +1,8 @@
+// Test 'use mod as alias' syntax
+use sys as s
+
+pub fn main()
+    let args = s.args
+    let cwd = s.cwd
+    print(args)
+    print(cwd)

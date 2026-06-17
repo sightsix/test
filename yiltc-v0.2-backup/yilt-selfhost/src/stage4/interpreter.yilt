@@ -1,0 +1,398 @@
+// ===========================================================================
+// Yilt Self-Host Compiler — Stage 4: Interpreter
+// ===========================================================================
+//
+// A tree-walking interpreter that executes Yilt programs by evaluating the
+// AST directly.  This is the final stage of the self-host bootstrap.
+//
+// IMPORTANT: Yilt doesn't yet support mutable global variables at runtime
+// (top-level `let mut` creates a const that's materialized fresh each
+// access).  To work around this, ALL interpreter state is threaded through
+// function parameters via a "Ctx" (context) struct.  This is the classic
+// "poor man's mutable state" pattern.
+//
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Section 1: Value representation
+// ---------------------------------------------------------------------------
+
+let VAL_INT = 1
+let VAL_STR = 2
+let VAL_BOOL = 3
+let VAL_NIL = 4
+
+struct Value
+    mut kind int
+    mut ival int
+    mut sval str
+
+fn v_int(n int) Value
+    let mut v = Value{kind: VAL_INT, ival: n, sval: ""}
+    return v
+
+fn v_str(s str) Value
+    let mut v = Value{kind: VAL_STR, ival: 0, sval: s}
+    return v
+
+fn v_bool(b bool) Value
+    let mut n = 0
+    if b
+        n = 1
+    let mut v = Value{kind: VAL_BOOL, ival: n, sval: ""}
+    return v
+
+fn v_nil() Value
+    let mut v = Value{kind: VAL_NIL, ival: 0, sval: ""}
+    return v
+
+fn v_truthy(v Value) bool
+    if v.kind == VAL_BOOL
+        return v.ival != 0
+    if v.kind == VAL_INT
+        return v.ival != 0
+    if v.kind == VAL_NIL
+        return false
+    return true
+
+fn v_to_str(v Value) str
+    if v.kind == VAL_INT
+        return int_to_str(v.ival)
+    if v.kind == VAL_STR
+        return v.sval
+    if v.kind == VAL_BOOL
+        if v.ival != 0
+            return "true"
+        return "false"
+    if v.kind == VAL_NIL
+        return "nil"
+    return "?"
+
+// ---------------------------------------------------------------------------
+// Section 2: Context (replaces globals)
+// ---------------------------------------------------------------------------
+
+struct Ctx
+    mut fn_defs table      // string-keyed: function name -> Node
+    mut globals table       // string-keyed: global var name -> Value
+    mut output str          // accumulated output
+
+// ---------------------------------------------------------------------------
+// Section 3: Local environment + return signal
+// ---------------------------------------------------------------------------
+
+struct Env
+    mut vars table
+
+fn env_new() Env
+    let mut e = Env{vars: {}}
+    return e
+
+fn env_get(e Env, name str, ctx Ctx) Value
+    if e.vars.has(name)
+        return e.vars[name]
+    if ctx.globals.has(name)
+        return ctx.globals[name]
+    return v_nil()
+
+fn env_set(e Env, name str, v Value)
+    e.vars[name] = v
+
+struct ReturnSignal
+    mut triggered bool
+    mut value Value
+
+fn rs_none() ReturnSignal
+    let mut rs = ReturnSignal{triggered: false, value: v_nil()}
+    return rs
+
+// ---------------------------------------------------------------------------
+// Section 4: Expression evaluation
+// ---------------------------------------------------------------------------
+
+fn eval_expr(e Node, env Env, ctx Ctx) Value
+    if e.kind == "int_lit"
+        return v_int(parse_int(e.sval))
+    if e.kind == "string_lit"
+        return v_str(e.sval)
+    if e.kind == "interp_str"
+        return v_str(e.sval)
+    if e.kind == "bool_true"
+        return v_bool(true)
+    if e.kind == "bool_false"
+        return v_bool(false)
+    if e.kind == "nil_lit"
+        return v_nil()
+    if e.kind == "ident"
+        return env_get(env, e.sval, ctx)
+    if e.kind == "binary"
+        return eval_binary(e, env, ctx)
+    if e.kind == "unary"
+        return eval_unary(e, env, ctx)
+    if e.kind == "call"
+        return eval_call(e, env, ctx)
+    return v_nil()
+
+fn eval_binary(e Node, env Env, ctx Ctx) Value
+    let la = e.a
+    let rb = e.b
+    let left = eval_expr(la[0], env, ctx)
+    let right = eval_expr(rb[0], env, ctx)
+    let op = e.sval
+    if op == "+"
+        if left.kind == VAL_STR or right.kind == VAL_STR
+            return v_str(v_to_str(left) + v_to_str(right))
+        return v_int(left.ival + right.ival)
+    if op == "-"
+        return v_int(left.ival - right.ival)
+    if op == "*"
+        return v_int(left.ival * right.ival)
+    if op == "/"
+        if right.ival == 0
+            return v_int(0)
+        return v_int(left.ival / right.ival)
+    if op == "%"
+        if right.ival == 0
+            return v_int(0)
+        return v_int(left.ival % right.ival)
+    if op == "=="
+        return v_bool(left.ival == right.ival)
+    if op == "!="
+        return v_bool(left.ival != right.ival)
+    if op == "<"
+        return v_bool(left.ival < right.ival)
+    if op == "<="
+        return v_bool(left.ival <= right.ival)
+    if op == ">"
+        return v_bool(left.ival > right.ival)
+    if op == ">="
+        return v_bool(left.ival >= right.ival)
+    if op == "and"
+        return v_bool(v_truthy(left) and v_truthy(right))
+    if op == "or"
+        return v_bool(v_truthy(left) or v_truthy(right))
+    return v_nil()
+
+fn eval_unary(e Node, env Env, ctx Ctx) Value
+    let oa = e.a
+    let operand = eval_expr(oa[0], env, ctx)
+    let op = e.sval
+    if op == "-"
+        return v_int(-operand.ival)
+    if op == "not"
+        return v_bool(not v_truthy(operand))
+    return operand
+
+fn eval_call(e Node, env Env, ctx Ctx) Value
+    let fa = e.a
+    if fa[0].kind != "ident"
+        return v_nil()
+    let fn_name = fa[0].sval
+    // Built-in: print
+    if fn_name == "print"
+        let args = e.list
+        let mut i = 0
+        while i < args.len()
+            let val = eval_expr(args[i], env, ctx)
+            ctx.output = ctx.output + v_to_str(val)
+            i = i + 1
+        return v_nil()
+    // Built-in: len
+    if fn_name == "len"
+        let args = e.list
+        if args.len() > 0
+            let val = eval_expr(args[0], env, ctx)
+            if val.kind == VAL_STR
+                return v_int(val.sval.len())
+        return v_int(0)
+    // Built-in: to_str
+    if fn_name == "to_str"
+        let args = e.list
+        if args.len() > 0
+            let val = eval_expr(args[0], env, ctx)
+            return v_str(v_to_str(val))
+        return v_str("")
+    // User-defined function
+    if not ctx.fn_defs.has(fn_name)
+        return v_nil()
+    let fn_node = ctx.fn_defs[fn_name]
+    // Evaluate arguments
+    let args = e.list
+    let mut arg_vals = {}
+    let mut i = 0
+    while i < args.len()
+        arg_vals[i] = eval_expr(args[i], env, ctx)
+        i = i + 1
+    // Create new environment
+    let fn_env = env_new()
+    // Bind parameters
+    let params = fn_node.a
+    i = 0
+    while i < params.len()
+        let param = params[i]
+        if i < arg_vals.len()
+            fn_env.vars[param.sval] = arg_vals[i]
+        i = i + 1
+    // Execute body
+    let rs = rs_none()
+    exec_block(fn_node.list, fn_env, ctx, rs)
+    return rs.value
+
+// ---------------------------------------------------------------------------
+// Section 5: Statement execution
+// ---------------------------------------------------------------------------
+
+fn exec_stmt(s Node, env Env, ctx Ctx, rs ReturnSignal)
+    if rs.triggered
+        return
+    if s.kind == "let_stmt"
+        let va = s.a
+        let val = eval_expr(va[0], env, ctx)
+        env_set(env, s.sval, val)
+        return
+    if s.kind == "return"
+        if s.a.has(0)
+            let va = s.a
+            rs.value = eval_expr(va[0], env, ctx)
+        rs.triggered = true
+        return
+    if s.kind == "if_stmt"
+        exec_if(s, env, ctx, rs)
+        return
+    if s.kind == "while_stmt"
+        exec_while(s, env, ctx, rs)
+        return
+    if s.kind == "assign"
+        let ea = s.a
+        let vb = s.b
+        let val = eval_expr(vb[0], env, ctx)
+        if ea[0].kind == "ident"
+            env_set(env, ea[0].sval, val)
+        return
+    if s.kind == "expr_stmt"
+        let ea = s.a
+        eval_expr(ea[0], env, ctx)
+        return
+
+fn exec_if(s Node, env Env, ctx Ctx, rs ReturnSignal)
+    let branches = s.list
+    let mut i = 0
+    while i < branches.len()
+        let b = branches[i]
+        let ca = b.a
+        let cond = eval_expr(ca[0], env, ctx)
+        if v_truthy(cond)
+            exec_block(b.b, env, ctx, rs)
+            return
+        i = i + 1
+    if s.a.has(0)
+        exec_block(s.a, env, ctx, rs)
+
+fn exec_while(s Node, env Env, ctx Ctx, rs ReturnSignal)
+    let ca = s.a
+    let body = s.list
+    let mut done = false
+    while not done
+        if rs.triggered
+            done = true
+        if not done
+            let cond = eval_expr(ca[0], env, ctx)
+            if not v_truthy(cond)
+                done = true
+        if not done
+            exec_block(body, env, ctx, rs)
+
+fn exec_block(block table, env Env, ctx Ctx, rs ReturnSignal)
+    let mut i = 0
+    while i < block.len()
+        if rs.triggered
+            return
+        let s = block[i]
+        exec_stmt(s, env, ctx, rs)
+        i = i + 1
+
+// ---------------------------------------------------------------------------
+// Section 6: Program execution
+// ---------------------------------------------------------------------------
+
+fn run_program(decls table, ctx Ctx) int
+    let mut i = 0
+    while i < decls.len()
+        let d = decls[i]
+        if d.kind == "fn_decl"
+            ctx.fn_defs[d.sval] = d
+        i = i + 1
+    if not ctx.fn_defs.has("main")
+        return 1
+    let main_fn = ctx.fn_defs["main"]
+    let main_env = env_new()
+    let rs = rs_none()
+    exec_block(main_fn.list, main_env, ctx, rs)
+    if rs.value.kind == VAL_INT
+        return rs.value.ival
+    return 0
+
+// ---------------------------------------------------------------------------
+// Section 7: Integer parsing
+// ---------------------------------------------------------------------------
+
+fn parse_int(s str) int
+    let bytes = s.bytes()
+    let n = bytes.len()
+    if n == 0
+        return 0
+    let mut i = 0
+    let mut neg = false
+    if bytes[0] == 45
+        neg = true
+        i = 1
+    let mut result = 0
+    while i < n
+        let b = bytes[i]
+        if b >= 48 and b <= 57
+            result = result * 10 + (b - 48)
+        i = i + 1
+    if neg
+        return -result
+    return result
+
+// ---------------------------------------------------------------------------
+// Section 8: Main entry point
+// ---------------------------------------------------------------------------
+
+fn main() int
+    print("=== Yilt Self-Host Stage 4: Interpreter ===")
+    print("")
+    
+    let src = "fn factorial(n int) int\n    if n <= 1\n        return 1\n    return n * factorial(n - 1)\n\nfn main() int\n    let result = factorial(5)\n    print(\"5! = \")\n    print(result)\n    let x = 3 + 4 * 2\n    print(\"3+4*2 = \")\n    print(x)\n    let mut i = 0\n    let mut sum = 0\n    while i < 10\n        sum = sum + i\n        i = i + 1\n    print(\"sum 0..9 = \")\n    print(sum)\n    return 0\n"
+    
+    print("Source program:")
+    print(src)
+    print("---")
+    print("Interpreting...")
+    print("")
+    
+    let tokens = lex_all(src)
+    let result = parse_program(tokens)
+    let nerrors = result.nerrors
+    print("Parse errors: ")
+    print(nerrors)
+    print("")
+    
+    if nerrors > 0
+        print("Parse errors found.")
+        return 1
+    
+    let decls = result.decls
+    let mut ctx = Ctx{fn_defs: {}, globals: {}, output: ""}
+    let exit_code = run_program(decls, ctx)
+    
+    print("---")
+    print("Program output:")
+    print(ctx.output)
+    print("---")
+    print("Exit code: ")
+    print(exit_code)
+    print("")
+    print("=== Stage 4 complete ===")
+    return 0

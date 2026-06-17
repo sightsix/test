@@ -1,0 +1,10 @@
+// String building and formatting with concatenation
+fn main()
+    let name = "World"
+    let age = 25
+    let greeting = "Hello, " + name + "!"
+    let info = "Age: " + to_str(age) + ", in 5 years: " + to_str(age + 5)
+    print(greeting)
+    print(info)
+    print("math: " + to_str(2 + 3))
+    print("bool: " + to_str(true))

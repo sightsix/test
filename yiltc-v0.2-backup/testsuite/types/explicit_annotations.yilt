@@ -1,0 +1,8 @@
+// Testing explicit type annotations on let bindings.
+fn main()
+    let x int = 42
+    let y str = "hello"
+    let z fp = 3.14
+    let w bool = true
+    let t table = {}
+    return x + z

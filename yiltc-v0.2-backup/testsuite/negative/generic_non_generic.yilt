@@ -1,0 +1,8 @@
+// Negative test: calling a non-generic function with type arguments
+// Expected: error
+
+fn add(a, b)
+    return a + b
+
+fn main()
+    print(add[int](1, 2))

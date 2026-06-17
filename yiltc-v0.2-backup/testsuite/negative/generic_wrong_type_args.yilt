@@ -1,0 +1,8 @@
+// Negative test: wrong number of type arguments
+// Expected: error
+
+fn identity[T](x T) T
+    return x
+
+fn main()
+    print(identity[int, str](42))

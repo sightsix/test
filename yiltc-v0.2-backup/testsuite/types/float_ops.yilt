@@ -1,0 +1,6 @@
+fn main()
+    let x = -3.14
+    let y = -x
+    print(y)
+    let z = 3.14 + 1.0
+    print(z)

@@ -1,0 +1,7 @@
+// Test 'from ... use ...' selective import syntax
+from sys use args, exit, cwd
+
+pub fn main()
+    print(args)
+    print(cwd)
+    exit(0)

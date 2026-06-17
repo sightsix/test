@@ -1,0 +1,8 @@
+fn main()
+    let result = shadow_test(5)
+    print(result)
+
+fn shadow_test(x)
+    let inner = x + 10
+    let y = inner * 2
+    return y

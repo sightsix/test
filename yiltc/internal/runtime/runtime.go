@@ -592,6 +592,24 @@ func init() {
                 Description: "Exit the program with the given status code.",
         })
         add(RuntimeSymbol{
+                Name:        "y_sys_write",
+                Signature:   "(i,s,i)->i",
+                Category:    CatSys,
+                Description: "Write bytes from a string to a file descriptor. Returns bytes written.",
+        })
+        add(RuntimeSymbol{
+                Name:        "y_sys_open",
+                Signature:   "(s,i,i)->i",
+                Category:    CatSys,
+                Description: "Open a file. Returns file descriptor or negative error.",
+        })
+        add(RuntimeSymbol{
+                Name:        "y_sys_close",
+                Signature:   "(i)->i",
+                Category:    CatSys,
+                Description: "Close a file descriptor. Returns 0 on success.",
+        })
+        add(RuntimeSymbol{
                 Name:        "y_sys_clock",
                 Signature:   "()->f",
                 Category:    CatSys,

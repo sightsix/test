@@ -1,0 +1,5 @@
+// Negative: arrow syntax on a local named function (let fn) is rejected.
+fn main()
+    let fn helper(x int) -> int
+        return x * 2
+    print(helper(21))

@@ -1,0 +1,26 @@
+// Test basic struct declaration and usage
+struct Point
+    mut x int
+    mut y int
+
+pub fn main()
+    let p = Point{x: 10, y: 20}
+    print(p.x)
+    print(p.y)
+    let mut q = Point{x: 1, y: 2}
+    q.x = 42
+    print(q.x)
+    print(q.y)
+    let r = make_point(100, 200)
+    print(r.x)
+    print(r.y)
+    let person = Person{name: "Alice", age: 30}
+    print(person.name)
+    print(person.age)
+
+struct Person
+    name str
+    age int
+
+fn make_point(a int, b int) Point
+    return Point{x: a, y: b}

@@ -1,0 +1,8 @@
+fn main()
+    let mut t = {}
+    t["a"] = 1
+    t["b"] = 2
+    let k = t.keys()
+    let v = t.values()
+    let has_a = t.has("a")
+    print(has_a)

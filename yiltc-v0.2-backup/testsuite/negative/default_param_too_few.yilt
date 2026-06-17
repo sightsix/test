@@ -1,0 +1,6 @@
+// Error: too few args (x has no default)
+fn needs_one(x int, y int = 10) int
+    return x + y
+
+fn main()
+    print(needs_one())

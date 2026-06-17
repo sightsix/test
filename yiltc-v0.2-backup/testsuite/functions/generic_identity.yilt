@@ -1,0 +1,12 @@
+// Test: generic identity function with explicit type arguments
+// Expected output: 42
+//                  hello
+
+fn identity[T](x T) T
+    return x
+
+fn main()
+    let a = identity[int](42)
+    print(a)
+    let b = identity[str]("hello")
+    print(b)

@@ -1,0 +1,6 @@
+// Negative: C-style || operator is rejected; use `or` keyword instead.
+fn main()
+    let a = true
+    let b = false
+    if a || b
+        print("nope")
