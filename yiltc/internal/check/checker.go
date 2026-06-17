@@ -3280,7 +3280,7 @@ func (c *Checker) resolveValueMethod(objType TypeDesc, field string) (TypeDesc, 
                 case "split":
                         return TypeDesc{Kind: TFunc, Params: []*TypeDesc{genP}, Ret: &TableDesc}, true
                 case "chars", "bytes":
-                        return TypeDesc{Kind: TFunc, Ret: &TypeDesc{Kind: TTable, KeyType: &IntDesc, ValType: &StrDesc}}, true
+                        return TypeDesc{Kind: TFunc, Ret: &TypeDesc{Kind: TTable, KeyType: &IntDesc, ValType: &IntDesc}}, true
                 }
         case TInt, TUint:
                 switch field {
