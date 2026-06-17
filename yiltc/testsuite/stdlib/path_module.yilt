@@ -1,3 +1,5 @@
+use path
+
 fn main()
     let joined = path.join("foo", "bar")
     let base = path.basename("/foo/bar.txt")

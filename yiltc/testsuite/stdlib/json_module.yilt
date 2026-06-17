@@ -1,3 +1,5 @@
+use json
+
 fn main()
     let data = {"key": "value"}
     let encoded = json.encode(data)

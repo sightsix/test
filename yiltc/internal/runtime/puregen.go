@@ -267,6 +267,13 @@ func (fb *rtFuncBuilder) getPtr(dst, src x86_64.Reg) {
 
 // mkTag creates a tagged value: dst = (tag << 56) | (val & VALUE_MASK)
 // Uses SHL 8 + SHR 8 to clear tag bits before OR-ing in the new tag.
+//
+// Bug fix: previously this function hardcoded R11 as the temp register
+// for the tag value.  But callers like genPure_StrConcat pass R11 as
+// both `val` and `dst`, which caused the MovRM64(R11, tag) to overwrite
+// the just-cleared pointer before the OR — producing a tagged value
+// with the right tag but a ZERO pointer, which downstream code saw as
+// nil.  Now we pick a temp that doesn't alias dst.
 func (fb *rtFuncBuilder) mkTag(tag uint64, val x86_64.Reg, dst x86_64.Reg) {
         if dst.Code != val.Code {
                 fb.a.MovRR(dst, val)
@@ -274,11 +281,17 @@ func (fb *rtFuncBuilder) mkTag(tag uint64, val x86_64.Reg, dst x86_64.Reg) {
         fb.a.ShlRI(dst, 8)
         fb.a.ShrRI(dst, 8)
         // OR the tag into the top byte (bits 56-63). The tag value is small
-        // (0-9), so tag<<56 exceeds 32-bit immediate range. Use R11
-        // (caller-saved, rarely used in runtime) as a temp register.
-        fb.a.MovRM64(x86_64.R11, int64(tag))
-        fb.a.ShlRI(x86_64.R11, 56)
-        fb.a.OrRR(dst, x86_64.R11)
+        // (0-9), so tag<<56 exceeds 32-bit immediate range. Use a 64-bit
+        // mov+shift through a temp register.  Pick R11 by default, but if
+        // dst IS R11, use R10 instead (also caller-saved, also rarely used
+        // in runtime).
+        temp := x86_64.R11
+        if dst.Code == x86_64.R11.Code {
+                temp = x86_64.R10
+        }
+        fb.a.MovRM64(temp, int64(tag))
+        fb.a.ShlRI(temp, 56)
+        fb.a.OrRR(dst, temp)
 }
 
 // ---------------------------------------------------------------------------

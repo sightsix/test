@@ -3054,11 +3054,33 @@ func (c *Checker) checkMemberExpr(ctx *fnCtx, n *ast.MemberExpr) TypeDesc {
                         // Look up the original module name (before aliasing) from imports.
                         origModule := moduleName
                         isStd := false
+                        hasLocalImport := false
                         for _, imp := range c.imports {
                                 if imp.Alias == moduleName {
                                         origModule = imp.ModuleName
                                         isStd = imp.IsStd
+                                        hasLocalImport = true
                                         break
+                                }
+                        }
+                        // If the user wrote `sys.platform` (or any stdlib
+                        // module name) WITHOUT an explicit `use sys`, treat
+                        // it as an implicit stdlib import.  Stdlib modules
+                        // are pre-registered as global bindings (see
+                        // registerStdlibModules), so the binding lookup
+                        // above succeeded — we just need to recognise that
+                        // the module name maps to a stdlib module here.
+                        //
+                        // BUT: if there is a local import with the same
+                        // alias and IsStd=false, the user has shadowed the
+                        // stdlib module with a local file (e.g. `use math`
+                        // resolving to ./math.yilt).  In that case, do NOT
+                        // fall back to the stdlib — let the local-module
+                        // code path handle it.
+                        if !isStd && !hasLocalImport {
+                                if _, isStdMod := stdModuleExports[moduleName]; isStdMod {
+                                        origModule = moduleName
+                                        isStd = true
                                 }
                         }
                         // For stdlib modules, look up the export.

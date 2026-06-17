@@ -2,8 +2,8 @@
 
 // Basic variadic: sum of integers
 fn sum(base int, nums ...int) int
-    let total = base
-    let i = 0
+    let mut total = base
+    let mut i = 0
     while i < len(nums)
         total = total + nums[i]
         i = i + 1
@@ -16,8 +16,8 @@ fn count_items(items ...int) int
 // Variadic with string payload
 fn join_all(sep str, parts ...str) str
     // Simple concatenation (no sep insertion — just test it compiles)
-    let result = ""
-    let i = 0
+    let mut result = ""
+    let mut i = 0
     while i < len(parts)
         result = result + parts[i]
         i = i + 1

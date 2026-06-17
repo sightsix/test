@@ -299,8 +299,12 @@ func genPure_StrConcat(rd *rodataBuilder) puregenFunc {
         fb.emitMemcpy(x86_64.RDI, x86_64.RSI, x86_64.RCX)
         a.Label(skip2)
 
-        // Return MK_TAG(TAG_STR, R11)
-        fb.mkTag(rtTagStr, x86_64.R11, x86_64.R11)
+        // Return MK_TAG(TAG_STR, R11) — result must be in RAX per the
+        // System V AMD64 calling convention.  Previously this called
+        // mkTag(rtTagStr, R11, R11) which left the tagged value in R11
+        // while the caller read RAX — so callers saw whatever mmap had
+        // left in RAX (an untagged pointer) and treated it as nil.
+        fb.mkTag(rtTagStr, x86_64.R11, x86_64.RAX)
 
         a.POP(x86_64.R15)
         a.POP(x86_64.R14)

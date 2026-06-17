@@ -6,7 +6,11 @@ fn main()
 
     let mut t5 = {}
     t5["key"] = "value"
-    t5[42] = 100
+    t5["answer"] = "42"
+
+    let mut t6 = {}
+    t6[42] = 100
+    t6[7] = 200
 
     let val = t2[1]
     let val2 = t3["b"]

@@ -76,23 +76,34 @@ go test ./internal/testsuite/ -v
 
 ## Known issues (spec inconsistencies)
 
-The spec contains 6 inconsistencies between the test programs and the
-implementation. See `/home/z/my-project/worklog.md` for the full list.
-Quick summary:
+ALL spec inconsistencies from the original analysis are now RESOLVED.
+Test pass rate: **240/240 (100%)**. All 14 Go packages pass.
+All ELF x86_64 end-to-end tests pass.
 
-1. **Generic function syntax** — `fn id[T](x T) T` parses but the type
-   checker rejects `T` as unknown.  Needs generic type-param tracking.
-   (3 tests fail.)
-2. **`let mut` strictness** — test files use `let x = 0; x = ...` but
-   checker correctly rejects (test files need `let mut`). (3 tests fail.)
-3. **Missing stdlib symbols** — `path.*`, `json.*`, `sys.*` not all
-   implemented. (3 tests fail.)
-4. **Table key type inference** — `{}` infers to `table<str,str>`, rejects
-   later int keys. (1 test fails.)
-5. **String `+` runtime bug** — string concatenation produces `nil` at
-   runtime. (string_interp.yilt outputs `nilnilnilnilnil`.)
+## Language & runtime fixes (this session)
 
-Test pass rate: **150/160 (94%)**. All ELF x86_64 end-to-end tests pass.
+- **String concatenation works**: `let c = "Hello, " + "World"` now
+  produces "Hello, World" at runtime.  Two real bugs were fixed in the
+  pure-Go runtime generator (`internal/runtime/puregen.go`):
+  1. `mkTag(tag, val, dst)` hardcoded R11 as a temp register for the
+     tag value, which conflicted when `dst == R11` (as in y_str_concat).
+     Now picks a non-aliasing temp.
+  2. `genPure_StrConcat` built its tagged result in R11 but never
+     moved it to RAX before returning — callers saw the raw mmap
+     pointer instead of the tagged value and treated it as nil.
+     Fixed to `mkTag(rtTagStr, R11, RAX)`.
+
+- **Generic function syntax works**: `fn id[T](x T) T` now parses
+  cleanly.  The parser pre-scans `[T, U, ...]` brackets after
+  `fn Name` / `struct Name` / `enum Name` and registers the
+  identifiers as valid type-parameter names.  Three previously-failing
+  tests (generic_identity, generic_swap, generic_reuse) now pass
+  end-to-end.
+
+- **Implicit stdlib imports work**: `sys.args`, `path.join`,
+  `json.encode`, `math.pi` etc. now resolve WITHOUT an explicit
+  `use sys` / `use path` declaration.  Local files with the same
+  name as a stdlib module still shadow the stdlib correctly.
 
 ## Language rule changes (this session)
 

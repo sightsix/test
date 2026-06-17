@@ -28,6 +28,12 @@ type Parser struct {
         // genericNames is populated by prescanGenericNames to allow
         // ident[type_args] syntax for generic function calls.
         genericNames map[string]bool
+        // typeParamNames is populated by prescanStructNames with the names
+        // declared inside `[T, U, ...]` brackets of generic fn/struct/enum
+        // declarations.  These are recognised as valid type annotations
+        // WITHIN the corresponding declaration's body so the parser can
+        // accept signatures like `fn id[T](x T) T`.
+        typeParamNames map[string]bool
         // inMatchPattern is set to true while parsing the value expression
         // of a match case.  When true and an enum variant has a single
         // bare-identifier payload, it is parsed as EnumMatchPattern (binding)
@@ -2177,6 +2183,7 @@ func (p *Parser) prescanStructNames() {
         p.structNames = make(map[string]bool)
         p.enumNames = make(map[string]bool)
         p.genericNames = make(map[string]bool)
+        p.typeParamNames = make(map[string]bool)
         for i := 0; i < len(p.tokens)-1; i++ {
                 if p.tokens[i].Kind == ast.TStruct && p.tokens[i+1].Kind == ast.TIdent {
                         p.structNames[p.tokens[i+1].Value] = true
@@ -2188,6 +2195,45 @@ func (p *Parser) prescanStructNames() {
                 // This allows ident[type_args] to be parsed as a generic call.
                 if i+2 < len(p.tokens) && p.tokens[i].Kind == ast.TFn && p.tokens[i+1].Kind == ast.TIdent && p.tokens[i+2].Kind == ast.TLBrack {
                         p.genericNames[p.tokens[i+1].Value] = true
+                }
+        }
+        // Second pass: collect type-parameter names declared inside `[T, U, ...]`
+        // brackets that appear after `fn Name` (and after `struct Name` / `enum Name`).
+        // These names are valid type references WITHIN the corresponding function/
+        // struct/enum body.  We collect them globally here so isTypeName() recognises
+        // them at parse time; the checker enforces scoping later.
+        for i := 0; i < len(p.tokens); i++ {
+                // Find 'fn Name' / 'struct Name' / 'enum Name' followed by '['
+                if i+2 < len(p.tokens) {
+                        tok0 := p.tokens[i].Kind
+                        tok1 := p.tokens[i+1].Kind
+                        tok2 := p.tokens[i+2].Kind
+                        if (tok0 == ast.TFn || tok0 == ast.TStruct || tok0 == ast.TEnum) &&
+                                tok1 == ast.TIdent && tok2 == ast.TLBrack {
+                                // Walk inside the brackets and collect identifiers.
+                                depth := 1
+                                j := i + 3
+                        bracketLoop:
+                                for j < len(p.tokens) && depth > 0 {
+                                        switch p.tokens[j].Kind {
+                                        case ast.TLBrack:
+                                                depth++
+                                        case ast.TRBrack:
+                                                depth--
+                                                if depth == 0 {
+                                                        break bracketLoop
+                                                }
+                                        case ast.TIdent:
+                                                // Only treat as type param if it's at bracket-depth 1
+                                                // (avoids matching identifiers inside nested brackets).
+                                                if depth == 1 {
+                                                        p.typeParamNames[p.tokens[j].Value] = true
+                                                }
+                                        }
+                                        j++
+                                }
+                                i = j // skip past the brackets
+                        }
                 }
         }
 }
@@ -2211,6 +2257,9 @@ func (p *Parser) isTypeName(name string) bool {
                 return true
         }
         if p.enumNames != nil && p.enumNames[name] {
+                return true
+        }
+        if p.typeParamNames != nil && p.typeParamNames[name] {
                 return true
         }
         return false

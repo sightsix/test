@@ -12,7 +12,7 @@ enum Priority
 
 pub fn main()
     // Store enums in a table
-    let tasks = {}
+    let mut tasks = {}
     tasks[0] = Status.Active
     tasks[1] = Status.Inactive
     tasks[2] = Priority.High
