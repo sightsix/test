@@ -1671,6 +1671,20 @@ func (l *lowerer) expr(e ast.Expr) *ir.Value {
                                                 fnName = sym
                                                 methodReceiver = l.expr(fn.Obj)
                                         }
+                                } else if td.Kind == check.TGen {
+                                        // Gen-typed receivers (e.g. values retrieved from
+                                        // tables via indexing, or function parameters without
+                                        // type annotations) should still resolve method calls
+                                        // to runtime functions. Try string methods first,
+                                        // then table methods. At runtime, the tagged value's
+                                        // tag byte determines which path is taken.
+                                        if sym, found := yiltruntime.StringMethodMapping[fn.Field]; found {
+                                                fnName = sym
+                                                methodReceiver = l.expr(fn.Obj)
+                                        } else if sym, found := yiltruntime.TableMethodMapping[fn.Field]; found {
+                                                fnName = sym
+                                                methodReceiver = l.expr(fn.Obj)
+                                        }
                                 } else if td.Kind == check.TStruct {
                                         // Struct method call: p.distance(other) → Point_distance(p, other)
                                         // Methods are detected by convention: "StructName_methodname".
