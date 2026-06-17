@@ -144,9 +144,10 @@ func (p *Parser) parseTopLevel() ast.Decl {
                 if let, ok := stmt.(*ast.LetStmt); ok {
                         if p.isConstExpr(let.Value) {
                                 return &ast.ConstDecl{
-                                        Name:  let.Name,
-                                        Value: let.Value,
-                                        Span:  let.Span,
+                                        Name:    let.Name,
+                                        Value:   let.Value,
+                                        Span:    let.Span,
+                                        Mutable: let.Mutable,
                                 }
                         }
                         p.error(tok, "top-level 'let' requires a constant value; use 'const' for compile-time constants, or wrap in a function")
@@ -1956,13 +1957,28 @@ func splitInterpSegments(raw string) []interpSegment {
 // ========== Token Helpers ==========
 
 // isConstExpr reports whether an expression is a compile-time constant
-// (literal, or unary negation of a literal).
+// suitable as a top-level binding.  We accept:
+//   - Literals (int, float, string, bool, nil)
+//   - Unary negation of literals (-42, not true)
+//   - Empty table literal {} — useful for module-level mutable state
+//     that gets populated by initialiser functions at runtime.
+//
+// Non-empty table literals are NOT accepted because their entries may
+// reference other bindings; the checker would need flow analysis to
+// verify constness.  Empty {} is safe because it has no dependencies.
 func (p *Parser) isConstExpr(e ast.Expr) bool {
         switch e.(type) {
         case *ast.IntLit, *ast.FloatLit, *ast.StringLit, *ast.BoolLit, *ast.NilLit:
                 return true
         case *ast.UnaryOp:
                 return true // -42, not true, etc. — validated later by the checker
+        case *ast.TableLit:
+                // Accept empty table literals as top-level constants.  This enables
+                // the module pattern: `let state = {}` at top level, populated by
+                // an init() function.  Non-empty tables are rejected because their
+                // entries may reference other top-level bindings.
+                tl := e.(*ast.TableLit)
+                return len(tl.Entries) == 0
         }
         return false
 }

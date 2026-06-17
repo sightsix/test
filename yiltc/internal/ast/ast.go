@@ -522,9 +522,10 @@ type (
         }
         // ConstDecl is a top-level const declaration.
         ConstDecl struct {
-                Name  string
-                Value Expr
-                Span  Pos
+                Name    string
+                Value   Expr
+                Span    Pos
+                Mutable bool // true for `let mut x = {}` at top level — allows module-level mutable state
         }
         // StructDecl is a struct type declaration.
         StructDecl struct {

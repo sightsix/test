@@ -861,7 +861,7 @@ func (c *Checker) registerConst(file string, decl *ast.ConstDecl) {
                 Name:   decl.Name,
                 Kind:   BndConst,
                 Type:   valType,
-                Mutable: false,
+                Mutable: decl.Mutable,
                 Public: false,
                 File:   file,
                 Pos:    decl.Span,
@@ -889,6 +889,13 @@ func (c *Checker) isConstValue(e ast.Expr) bool {
                         }
                 }
                 return true
+        case *ast.TableLit:
+                // Allow empty table literal {} as a top-level constant.  This
+                // enables the module pattern: `let state = {}` at top level,
+                // populated by an init() function at runtime.  Non-empty tables
+                // are rejected because their entries may reference other
+                // top-level bindings (which would require flow analysis).
+                return len(v.Entries) == 0
         case *ast.UnaryOp:
                 // Allow -lit and not lit
                 if v.Op == ast.TMinus || v.Op == ast.TNot {
@@ -920,6 +927,10 @@ func (c *Checker) constExprType(e ast.Expr) TypeDesc {
                         return b.Type
                 }
                 return GenDesc
+        case *ast.TableLit:
+                // Empty table literal {} — return TableDesc with gen key/val types
+                // so it can be assigned to any table-typed binding.
+                return TableDesc
         case *ast.UnaryOp:
                 // Derive the type from the operand so that const x = -3.14 gets FpDesc
                 // and const y = -42 gets IntDesc, instead of always falling back to GenDesc.
