@@ -1,0 +1,574 @@
+// ===========================================================================
+// Yilt Self-Host Compiler — Stage 3: Type Checker
+// ===========================================================================
+//
+// A type checker for Yilt, written in Yilt.  Consumes the AST from Stage 2
+// and performs semantic analysis: scope management, type inference, type
+// checking for expressions and statements, and error reporting.
+//
+// Type system:
+//   - int, uint, fp, bool, str, table, void, gen (generic/unresolved)
+//   - Function types: (params...) -> ret
+//   - Named types: struct/enum names
+//
+// The checker makes two passes:
+//   1. Declaration pass: register all top-level declarations (functions,
+//      structs, enums, globals) in the global scope.
+//   2. Body pass: check each function body, building local scopes and
+//      inferring/checking types for all expressions and statements.
+//
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Section 1: Type representation
+// ---------------------------------------------------------------------------
+//
+// Types are represented as Type structs.  We use a tagged-union approach
+// similar to AST nodes.
+
+let TYPE_INT = 1
+let TYPE_UINT = 2
+let TYPE_FP = 3
+let TYPE_BOOL = 4
+let TYPE_STR = 5
+let TYPE_TABLE = 6
+let TYPE_VOID = 7
+let TYPE_GEN = 8        // unresolved / generic
+let TYPE_FUNC = 9
+let TYPE_NAMED = 10     // struct or enum
+
+struct Type
+    mut kind int        // one of TYPE_*
+    mut name str        // for TYPE_NAMED: the struct/enum name
+    mut ret str         // for TYPE_FUNC: return type name (simplified)
+
+// Common type constructors.
+fn t_int() Type
+    let mut t = Type{kind: TYPE_INT, name: "", ret: ""}
+    return t
+
+fn t_str() Type
+    let mut t = Type{kind: TYPE_STR, name: "", ret: ""}
+    return t
+
+fn t_bool() Type
+    let mut t = Type{kind: TYPE_BOOL, name: "", ret: ""}
+    return t
+
+fn t_gen() Type
+    let mut t = Type{kind: TYPE_GEN, name: "", ret: ""}
+    return t
+
+fn t_void() Type
+    let mut t = Type{kind: TYPE_VOID, name: "", ret: ""}
+    return t
+
+// Parse a type name string into a Type struct.
+fn parse_type(name str) Type
+    if name == "int"
+        return t_int()
+    if name == "uint"
+        let mut t = Type{kind: TYPE_UINT, name: "", ret: ""}
+        return t
+    if name == "fp"
+        let mut t = Type{kind: TYPE_FP, name: "", ret: ""}
+        return t
+    if name == "bool"
+        return t_bool()
+    if name == "str"
+        return t_str()
+    if name == "table"
+        let mut t = Type{kind: TYPE_TABLE, name: "", ret: ""}
+        return t
+    if name == "void"
+        return t_void()
+    if name == ""
+        return t_gen()
+    // Named type (struct or enum)
+    let mut t = Type{kind: TYPE_NAMED, name: name, ret: ""}
+    return t
+
+// Get the name of a type for display.
+fn type_name(t Type) str
+    if t.kind == TYPE_INT
+        return "int"
+    if t.kind == TYPE_UINT
+        return "uint"
+    if t.kind == TYPE_FP
+        return "fp"
+    if t.kind == TYPE_BOOL
+        return "bool"
+    if t.kind == TYPE_STR
+        return "str"
+    if t.kind == TYPE_TABLE
+        return "table"
+    if t.kind == TYPE_VOID
+        return "void"
+    if t.kind == TYPE_GEN
+        return "gen"
+    if t.kind == TYPE_FUNC
+        return "fn"
+    if t.kind == TYPE_NAMED
+        return t.name
+    return "unknown"
+
+// Check if two types are compatible (assignable).
+fn types_match(a Type, b Type) bool
+    if a.kind == b.kind
+        return true
+    // gen matches anything
+    if a.kind == TYPE_GEN or b.kind == TYPE_GEN
+        return true
+    // int and uint are interchangeable
+    if a.kind == TYPE_INT and b.kind == TYPE_UINT
+        return true
+    if a.kind == TYPE_UINT and b.kind == TYPE_INT
+        return true
+    // named types match by name
+    if a.kind == TYPE_NAMED and b.kind == TYPE_NAMED
+        return a.name == b.name
+    return false
+
+// ---------------------------------------------------------------------------
+// Section 2: Scope / symbol table
+// ---------------------------------------------------------------------------
+//
+// A scope is a table of name -> Binding.  Bindings hold the type and kind
+// (variable, function, type, module) of each symbol.
+
+let BND_VAR = 1
+let BND_FN = 2
+let BND_TYPE = 3
+let BND_MODULE = 4
+
+struct Binding
+    mut name str
+    mut kind int        // BND_*
+    mut btype Type      // the type of this binding
+    mut mutable bool
+
+struct Scope
+    mut bindings table  // string-keyed table of Binding structs
+    mut parent table    // {0: Scope} — parent scope (wrapped in table)
+
+fn scope_new(parent table) Scope
+    let mut s = Scope{bindings: {}, parent: parent}
+    return s
+
+fn scope_define(s Scope, name str, btype Type, kind int, mutable bool)
+    let mut b = Binding{name: name, kind: kind, btype: btype, mutable: mutable}
+    s.bindings[name] = b
+
+fn scope_lookup(s Scope, name str) Binding
+    if s.bindings.has(name)
+        return s.bindings[name]
+    // Walk up the parent chain.
+    if s.parent.has(0)
+        let p = s.parent[0]
+        return scope_lookup(p, name)
+    // Not found — return an empty binding.
+    let mut b = Binding{name: "", kind: 0, btype: t_gen(), mutable: false}
+    return b
+
+fn scope_has(s Scope, name str) bool
+    if s.bindings.has(name)
+        return true
+    if s.parent.has(0)
+        let p = s.parent[0]
+        return scope_has(p, name)
+    return false
+
+// ---------------------------------------------------------------------------
+// Section 3: Checker state
+// ---------------------------------------------------------------------------
+//
+// We use a global table for function declarations to avoid deep-copying
+// the Checker struct through many function call layers (which caused
+// a segfault when accessing string-keyed table entries after 7+ copies).
+
+let mut g_functions = {}
+let mut g_structs = {}
+let mut g_enums = {}
+let mut g_global_bindings = {}
+let mut g_errors = {}
+let mut g_nerrors = 0
+
+struct Checker
+    mut errors table
+    mut nerrors int
+
+fn checker_new() Checker
+    let mut c = Checker{errors: {}, nerrors: 0}
+    g_functions = {}
+    g_structs = {}
+    g_enums = {}
+    g_errors = {}
+    g_nerrors = 0
+    g_global_bindings = {}
+    return c
+
+fn checker_error(msg str)
+    g_errors[g_nerrors] = msg
+    g_nerrors = g_nerrors + 1
+
+// ---------------------------------------------------------------------------
+// Section 4: Declaration pass — register all top-level declarations
+// ---------------------------------------------------------------------------
+
+fn check_program(c Checker, decls table) int
+    // Pass 1: register all declarations.
+    let mut i = 0
+    while i < decls.len()
+        let d = decls[i]
+        register_decl(c, d)
+        i = i + 1
+    // Pass 2: check function bodies.
+    i = 0
+    while i < decls.len()
+        let d = decls[i]
+        if d.kind == "fn_decl"
+            check_fn_body(c, d)
+        i = i + 1
+    return g_nerrors
+
+fn register_decl(c Checker, d Node)
+    if d.kind == "fn_decl"
+        // Register function signature in global scope.
+        let mut ret_type = parse_type(d.extra)
+        g_global_bindings[d.sval] = Binding{name: d.sval, kind: BND_FN, btype: ret_type, mutable: false}
+        g_functions[d.sval] = d
+    if d.kind == "extern_decl"
+        let mut ret_type = parse_type(d.extra)
+        g_global_bindings[d.sval] = Binding{name: d.sval, kind: BND_FN, btype: ret_type, mutable: false}
+    if d.kind == "struct_decl"
+        let mut t = Type{kind: TYPE_NAMED, name: d.sval, ret: ""}
+        g_global_bindings[d.sval] = Binding{name: d.sval, kind: BND_TYPE, btype: t, mutable: false}
+        g_structs[d.sval] = d
+    if d.kind == "enum_decl"
+        let mut t = Type{kind: TYPE_NAMED, name: d.sval, ret: ""}
+        g_global_bindings[d.sval] = Binding{name: d.sval, kind: BND_TYPE, btype: t, mutable: false}
+        g_enums[d.sval] = d
+    if d.kind == "let_decl"
+        let vtype = parse_type(d.extra)
+        let mut va = d.a
+        let mut gs = Scope{bindings: g_global_bindings, parent: {}}
+        let inferred = infer_expr_type(c, va[0], gs)
+        if vtype.kind == TYPE_GEN
+            g_global_bindings[d.sval] = Binding{name: d.sval, kind: BND_VAR, btype: inferred, mutable: d.bval}
+        else
+            g_global_bindings[d.sval] = Binding{name: d.sval, kind: BND_VAR, btype: vtype, mutable: d.bval}
+    if d.kind == "use_decl"
+        let mut t = Type{kind: TYPE_GEN, name: d.sval, ret: ""}
+        g_global_bindings[d.sval] = Binding{name: d.sval, kind: BND_MODULE, btype: t, mutable: false}
+
+// ---------------------------------------------------------------------------
+// Section 5: Function body checking
+// ---------------------------------------------------------------------------
+
+fn check_fn_body(c Checker, fn_decl Node)
+    // Create a function scope with the global scope as parent.
+    let mut gp = {}
+    let mut gs2 = Scope{bindings: g_global_bindings, parent: {}}
+    gp[0] = gs2
+    let fn_scope = scope_new(gp)
+    // Register parameters.
+    let params = fn_decl.a
+    let mut i = 0
+    while i < params.len()
+        let param = params[i]
+        let ptype = parse_type(param.extra)
+        scope_define(fn_scope, param.sval, ptype, BND_VAR, param.bval)
+        i = i + 1
+    // Check body statements.
+    let body = fn_decl.list
+    i = 0
+    while i < body.len()
+        let s = body[i]
+        check_stmt(c, s, fn_scope)
+        i = i + 1
+
+// ---------------------------------------------------------------------------
+// Section 6: Statement checking
+// ---------------------------------------------------------------------------
+
+fn check_stmt(c Checker, s Node, scope Scope)
+    if s.kind == "let_stmt"
+        check_let_stmt(c, s, scope)
+        return
+    if s.kind == "return"
+        check_return_stmt(c, s, scope)
+        return
+    if s.kind == "if_stmt"
+        check_if_stmt(c, s, scope)
+        return
+    if s.kind == "while_stmt"
+        check_while_stmt(c, s, scope)
+        return
+    if s.kind == "for_stmt"
+        check_for_stmt(c, s, scope)
+        return
+    if s.kind == "assign"
+        check_assign_stmt(c, s, scope)
+        return
+    if s.kind == "expr_stmt"
+        let ea = s.a
+        infer_expr_type(c, ea[0], scope)
+        return
+    if s.kind == "break"
+        return
+    if s.kind == "continue"
+        return
+
+fn check_let_stmt(c Checker, s Node, scope Scope)
+    let va = s.a
+    let inferred = infer_expr_type(c, va[0], scope)
+    let vtype = parse_type(s.extra)
+    if vtype.kind == TYPE_GEN
+        scope_define(scope, s.sval, inferred, BND_VAR, s.bval)
+    else
+        scope_define(scope, s.sval, vtype, BND_VAR, s.bval)
+
+fn check_return_stmt(c Checker, s Node, scope Scope)
+    // For Stage 3, we just check that the return expression is valid.
+    if s.a.has(0)
+        let va = s.a
+        infer_expr_type(c, va[0], scope)
+
+fn check_if_stmt(c Checker, s Node, scope Scope)
+    let branches = s.list
+    let mut i = 0
+    while i < branches.len()
+        let b = branches[i]
+        let ca = b.a
+        infer_expr_type(c, ca[0], scope)
+        // Create a child scope for the branch body.
+        let mut sp = {}
+        sp[0] = scope
+        let block_scope = scope_new(sp)
+        check_block(c, b.b, block_scope)
+        i = i + 1
+    // Check else block.
+    if s.a.has(0)
+        let mut sp = {}
+        sp[0] = scope
+        let block_scope = scope_new(sp)
+        check_block(c, s.a, block_scope)
+
+fn check_while_stmt(c Checker, s Node, scope Scope)
+    let ca = s.a
+    infer_expr_type(c, ca[0], scope)
+    let mut sp = {}
+    sp[0] = scope
+    let block_scope = scope_new(sp)
+    check_block(c, s.list, block_scope)
+
+fn check_for_stmt(c Checker, s Node, scope Scope)
+    let ia = s.a
+    infer_expr_type(c, ia[0], scope)
+    let mut sp = {}
+    sp[0] = scope
+    let block_scope = scope_new(sp)
+    // Register loop variables.
+    scope_define(block_scope, s.sval, t_gen(), BND_VAR, false)
+    if s.extra != ""
+        scope_define(block_scope, s.extra, t_gen(), BND_VAR, false)
+    check_block(c, s.list, block_scope)
+
+fn check_assign_stmt(c Checker, s Node, scope Scope)
+    let ea = s.a
+    infer_expr_type(c, ea[0], scope)
+    let vb = s.b
+    infer_expr_type(c, vb[0], scope)
+    // Check mutability.
+    if ea[0].kind == "ident"
+        let b = scope_lookup(scope, ea[0].sval)
+        if b.name != ""
+            if not b.mutable
+                let mut msg = "cannot assign to immutable variable '"
+                msg = msg + ea[0].sval
+                msg = msg + "'"
+                checker_error( msg)
+
+fn check_block(c Checker, block table, scope Scope)
+    let mut i = 0
+    while i < block.len()
+        let s = block[i]
+        check_stmt(c, s, scope)
+        i = i + 1
+
+// ---------------------------------------------------------------------------
+// Section 7: Expression type inference
+// ---------------------------------------------------------------------------
+//
+// infer_expr_type walks an expression node and returns its Type.
+// It also performs basic type checking (e.g. binary op operand types).
+
+fn infer_expr_type(c Checker, e Node, scope Scope) Type
+    if e.kind == "int_lit"
+        return t_int()
+    if e.kind == "float_lit"
+        let mut t = Type{kind: TYPE_FP, name: "", ret: ""}
+        return t
+    if e.kind == "string_lit"
+        return t_str()
+    if e.kind == "interp_str"
+        return t_str()
+    if e.kind == "bool_true"
+        return t_bool()
+    if e.kind == "bool_false"
+        return t_bool()
+    if e.kind == "nil_lit"
+        return t_gen()
+    if e.kind == "ident"
+        let b = scope_lookup(scope, e.sval)
+        if b.name == ""
+            let mut msg = "undefined variable '"
+            msg = msg + e.sval
+            msg = msg + "'"
+            checker_error( msg)
+            return t_gen()
+        return b.btype
+    if e.kind == "binary"
+        return infer_binary_type(c, e, scope)
+    if e.kind == "unary"
+        let oa = e.a
+        return infer_expr_type(c, oa[0], scope)
+    if e.kind == "call"
+        return infer_call_type(c, e, scope)
+    if e.kind == "member"
+        let oa = e.a
+        infer_expr_type(c, oa[0], scope)
+        return t_gen()
+    if e.kind == "index"
+        let oa = e.a
+        infer_expr_type(c, oa[0], scope)
+        return t_gen()
+    if e.kind == "table_lit"
+        return Type{kind: TYPE_TABLE, name: "", ret: ""}
+    if e.kind == "tuple_lit"
+        return t_gen()
+    if e.kind == "fn_expr"
+        return t_gen()
+    if e.kind == "error_prop"
+        let oa = e.a
+        return infer_expr_type(c, oa[0], scope)
+    return t_gen()
+
+fn infer_binary_type(c Checker, e Node, scope Scope) Type
+    let la = e.a
+    let rb = e.b
+    let lt = infer_expr_type(c, la[0], scope)
+    let rt = infer_expr_type(c, rb[0], scope)
+    let op = e.sval
+    // String concatenation: str + str -> str
+    if op == "+"
+        if lt.kind == TYPE_STR or rt.kind == TYPE_STR
+            return t_str()
+    // Comparison operators: return bool
+    if op == "==" or op == "!=" or op == "<" or op == "<=" or op == ">" or op == ">="
+        return t_bool()
+    // Logical operators: return bool
+    if op == "and" or op == "or"
+        return t_bool()
+    // Arithmetic: result type follows operand promotion
+    if op == "+" or op == "-" or op == "*" or op == "/" or op == "%"
+        if lt.kind == TYPE_FP or rt.kind == TYPE_FP
+            let mut t = Type{kind: TYPE_FP, name: "", ret: ""}
+            return t
+        return t_int()
+    // Bitwise: return int
+    if op == "&" or op == "|" or op == "^" or op == "<<" or op == ">>"
+        return t_int()
+    return t_gen()
+
+fn infer_call_type(c Checker, e Node, scope Scope) Type
+    let fa = e.a
+    // Get the function name (for simple ident calls).
+    if fa[0].kind == "ident"
+        let fn_name = fa[0].sval
+        let b = scope_lookup(scope, fn_name)
+        if b.name == ""
+            let mut msg = "undefined function '"
+            msg = msg + fn_name
+            msg = msg + "'"
+            checker_error( msg)
+            return t_gen()
+        // Check argument count.
+        let args = e.list
+        if g_functions.has(fn_name)
+            let fn_node = g_functions[fn_name]
+            let params = fn_node.a
+            let expected = params.len()
+            let actual = args.len()
+            if expected != actual
+                let mut msg = "function '"
+                msg = msg + fn_name
+                msg = msg + "' expects "
+                msg = msg + int_to_str(expected)
+                msg = msg + " args, got "
+                msg = msg + int_to_str(actual)
+                checker_error( msg)
+        return b.btype
+    // For non-ident calls (e.g. member.x()), we can't easily resolve the return type.
+    infer_expr_type(c, fa[0], scope)
+    return t_gen()
+
+// ---------------------------------------------------------------------------
+// Section 8: Main entry point
+// ---------------------------------------------------------------------------
+
+fn main() int
+    print("=== Yilt Self-Host Stage 3: Type Checker ===")
+    print("")
+    
+    let src = "fn add(a int, b int) int\n    return a + b\n\nfn main() int\n    let x = add(1, 2)\n    print(x)\n    let s = \"hello\"\n    let mut count = 0\n    count = count + 1\n    return 0\n"
+    
+    print("Source:")
+    print(src)
+    print("---")
+    print("Type checking...")
+    print("")
+    
+    let tokens = lex_all(src)
+    let result = parse_program(tokens)
+    let nerrors = result.nerrors
+    print("Parse errors: ")
+    print(nerrors)
+    print("")
+    
+    if nerrors > 0
+        print("Parse errors found — skipping type check.")
+        return 1
+    
+    let mut c = checker_new()
+    let decls = result.decls
+    let tc_errors = check_program(c, decls)
+    print("Type check errors: ")
+    print(tc_errors)
+    print("")
+    
+    if tc_errors > 0
+        print("Errors:")
+        let errors = g_errors
+        let mut i = 0
+        while i < errors.len()
+            print("  ")
+            print(errors[i])
+            print("")
+            i = i + 1
+    
+    print("Registered functions:")
+    let mut i = 0
+    while i < decls.len()
+        let d = decls[i]
+        if d.kind == "fn_decl"
+            print("  fn ")
+            print(d.sval)
+            print(" -> ")
+            print(d.extra)
+            print("")
+        i = i + 1
+    
+    print("")
+    print("=== Stage 3 complete ===")
+    return 0
