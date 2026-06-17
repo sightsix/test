@@ -432,10 +432,11 @@ func (f *CheckedFn) bindingType() TypeDesc {
 
 // CheckedConst is a type-checked top-level constant.
 type CheckedConst struct {
-        Name  string
-        Value ast.Expr
-        Type  TypeDesc
-        Pos   ast.Pos
+        Name    string
+        Value   ast.Expr
+        Type    TypeDesc
+        Pos     ast.Pos
+        Mutable bool
 }
 
 // CheckedProgram is the output of semantic analysis.
@@ -871,10 +872,11 @@ func (c *Checker) registerConst(file string, decl *ast.ConstDecl) {
         }
         c.global.Define(decl.Name, binding)
         c.consts[decl.Name] = &CheckedConst{
-                Name:  decl.Name,
-                Value: decl.Value,
-                Type:  valType,
-                Pos:   decl.Span,
+                Name:    decl.Name,
+                Value:   decl.Value,
+                Type:    valType,
+                Pos:     decl.Span,
+                Mutable: decl.Mutable,
         }
 }
 

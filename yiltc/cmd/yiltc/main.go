@@ -815,12 +815,27 @@ func lowerToIR(cp *check.CheckedProgram) *ir.Module {
                         variadicFuncs: variadicFuncs,
                         defaultParams: defaultParams,
                         consts:        make(map[string]ast.Expr, len(cp.Consts)),
+                        mutableGlobals: make(map[string]*ir.Value),
                         importAliases: importAliases,
                 }
 
                 // Seed const table from checked program.
                 for cn, cc := range cp.Consts {
-                        lower.consts[cn] = cc.Value
+                        if cc.Mutable {
+                                // Mutable top-level variable: create a table to hold the value.
+                                // The table is created once and its entries are mutated.
+                                // On read: table_get(globalTable, key)
+                                // On write: table_set(globalTable, key, val)
+                                initVal := lower.expr(cc.Value)
+                                tbl := b.TableNew(1, "mut_global_"+cn)
+                                keyStr := b.ConstStr(cn, "mut_global_key")
+                                keyLen := b.ConstRawInt(int64(len(cn)), "mut_global_key.len")
+                                keyStrVal := b.Call("y_str_new", []*ir.Value{keyStr, keyLen}, ir.VRaw, "mut_global_key.str")
+                                b.TableSet(tbl, keyStrVal, initVal)
+                                lower.mutableGlobals[cn] = tbl
+                        } else {
+                                lower.consts[cn] = cc.Value
+                        }
                 }
 
                 // Bind parameters as locals
@@ -862,6 +877,7 @@ type lowerer struct {
         variadicFuncs map[string]int              // variadic func name → fixed param count
         defaultParams map[string][]ast.Expr        // func name → default expr per param (nil = no default)
         consts        map[string]ast.Expr          // module-level const name → value expression
+        mutableGlobals map[string]*ir.Value        // mutable global name → table Value (for mutable top-level vars)
         importAliases map[string]string           // alias → original module name (for 'use sys as s')
 }
 
@@ -1517,6 +1533,13 @@ func (l *lowerer) expr(e ast.Expr) *ir.Value {
         case *ast.Ident:
                 if v, ok := l.locals[e.Name]; ok {
                         return v
+                }
+                // Check mutable globals (table-backed)
+                if gt, ok := l.mutableGlobals[e.Name]; ok {
+                        keyStr := b.ConstStr(e.Name, "gkey."+e.Name)
+                        keyLen := b.ConstRawInt(int64(len(e.Name)), "gkey."+e.Name+".len")
+                        keyStrVal := b.Call("y_str_new", []*ir.Value{keyStr, keyLen}, ir.VRaw, "gkey."+e.Name+".str")
+                        return b.TableGet(gt, keyStrVal, "gval."+e.Name)
                 }
                 // Check module-level consts
                 if ce, ok := l.consts[e.Name]; ok {
