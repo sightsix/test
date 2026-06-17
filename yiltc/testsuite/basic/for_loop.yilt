@@ -1,0 +1,18 @@
+fn main()
+    let items = {1: "a", 2: "b", 3: "c"}
+
+    for key, val in items
+        let x = key
+        let y = val
+
+    for k in items
+        let z = k
+
+    let empty = {}
+    for k, v in empty
+        let a = k
+
+    let nums = {1: 10, 2: 20, 3: 30}
+    let mut total = 0
+    for k, v in nums
+        total = total + v

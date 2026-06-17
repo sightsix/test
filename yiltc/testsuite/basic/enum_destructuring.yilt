@@ -1,0 +1,44 @@
+// Test: enum pattern destructuring in match arms
+// case Result.Ok(x) should bind the payload to variable x
+
+enum Option
+    Some(int)
+    None
+
+enum Result
+    Ok(int)
+    Err(str)
+
+fn unwrap_or(opt Option, fallback int) int
+    match opt
+        case Option.Some(v)
+            return v
+        case Option.None
+            return fallback
+
+fn main()
+    // Test 1: basic destructuring
+    let x = Option.Some(42)
+    let result = unwrap_or(x, 0)
+    println(result)
+
+    // Test 2: None branch
+    let y = Option.None
+    let result2 = unwrap_or(y, 99)
+    println(result2)
+
+    // Test 3: inline match with destructuring
+    let r = Result.Ok(7)
+    match r
+        case Result.Ok(val)
+            println(val)
+        case Result.Err(msg)
+            println(msg)
+
+    // Test 4: Err branch with destructuring
+    let r2 = Result.Err("something failed")
+    match r2
+        case Result.Ok(v2)
+            println(v2)
+        case Result.Err(e)
+            println(e)

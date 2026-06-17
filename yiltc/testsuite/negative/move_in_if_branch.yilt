@@ -1,0 +1,9 @@
+// Move in one if-branch, then use after merge — should error
+fn main()
+    let a = {"k": 1}
+    let x = 1
+    if x == 1
+        let b = a
+    else
+        print(a)
+    print(a)

@@ -1,0 +1,24 @@
+fn main()
+    let t = {}
+    let t2 = {1: 10, 2: 20, 3: 30}
+    let t3 = {"a": 1, "b": 2, "c": 3}
+    let t4 = {0: "zero", 1: "one", 2: "two"}
+
+    let mut t5 = {}
+    t5["key"] = "value"
+    t5[42] = 100
+
+    let val = t2[1]
+    let val2 = t3["b"]
+
+    let l = t2.len()
+    let h = t2.has(2)
+    let h2 = t2.has(99)
+
+    for k, v in t2
+        let x = k
+        let y = v
+
+    let nested = {1: {2: 3}, 4: {5: 6}}
+    let inner = nested[1]
+    let deep = inner[2]

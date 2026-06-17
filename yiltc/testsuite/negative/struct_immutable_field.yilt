@@ -1,0 +1,8 @@
+// Attempting to assign to an immutable struct field should error
+struct Person
+    name str
+    age int
+
+fn main()
+    let p = Person{name: "Alice", age: 30}
+    p.name = "Bob"

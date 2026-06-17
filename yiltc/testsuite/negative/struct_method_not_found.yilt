@@ -1,0 +1,15 @@
+// Test error cases for struct method dispatch
+// 1. Calling a non-existent method should produce an error
+// 2. Wrong number of arguments to a method should produce an error
+
+struct Point
+    mut x int
+    mut y int
+
+fn Point_get_x(self Point) int
+    return self.x
+
+fn main()
+    let p = Point{x: 1, y: 2}
+    // Should error: Point has no method 'nonexistent'
+    p.nonexistent()

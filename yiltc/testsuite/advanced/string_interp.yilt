@@ -1,0 +1,14 @@
+// String concatenation and building tests
+fn main()
+    let name = "World"
+    let age = 25
+    let greeting = "Hello, " + name + "!"
+    let info = "Age: " + to_str(age)
+    let nested = name + " has " + to_str(len(name)) + " chars"
+    let math = "2 + 3 = " + to_str(2 + 3)
+    let bool_val = "active: " + to_str(true)
+    print(greeting)
+    print(info)
+    print(nested)
+    print(math)
+    print(bool_val)

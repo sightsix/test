@@ -1,0 +1,5 @@
+fn main()
+    let f = fn(x, y)
+        return x + y
+    let result = f(3, 4)
+    print(result)

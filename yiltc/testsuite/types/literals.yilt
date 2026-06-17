@@ -1,0 +1,12 @@
+fn main()
+    let n = 42
+    let s = "hello"
+    let b = true
+    let t = {1: 2}
+    let e = nil
+
+    let v1 = 10 + 20
+    let v2 = "a" + "b"
+    let v3 = not false
+
+    let mixed_table = {1: "one", "two": 2, true: false}

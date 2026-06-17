@@ -1,0 +1,6 @@
+fn main()
+    let args = sys.args
+    let cwd = sys.cwd
+    let platform = sys.platform
+
+    sys.exit(0)

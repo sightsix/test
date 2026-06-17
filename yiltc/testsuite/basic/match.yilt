@@ -1,0 +1,29 @@
+fn main()
+    let x = 1
+    match x
+        case 1
+            let a = 10
+        case 2
+            let b = 20
+        case 3
+            let c = 30
+        default
+            let d = 40
+
+    let y = 99
+    match y
+        case 1
+            let e = 1
+        case 2
+            let f = 2
+        default
+            let g = 99
+
+    let s = "hello"
+    match s
+        case "world"
+            let h = 1
+        case "hello"
+            let i = 2
+        default
+            let j = 3

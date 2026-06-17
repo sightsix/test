@@ -1,0 +1,24 @@
+fn main()
+    let a = 1.5
+    let b = 2.25
+    let c = a + b
+    let d = a - b
+    let e = a * b
+    let f = a / b
+
+    let g = 3.14
+    let h = g.neg()
+    let i = g.abs()
+    let j = g.floor()
+    let k = g.ceil()
+    let l = g.round()
+    let m = g.sign()
+    let n = g.sqrt()
+
+    let o = 1.0
+    let p = o.clamp(0.0, 100.0)
+
+    let int1 = 10
+    let int2 = 3
+    let q = int1 / int2
+    let r = int1 % int2

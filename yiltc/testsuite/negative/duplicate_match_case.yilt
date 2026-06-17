@@ -1,0 +1,10 @@
+fn main()
+    match 42
+        case 1
+            print("one")
+        case 2
+            print("two")
+        case 1
+            print("duplicate one")
+        default
+            print("other")

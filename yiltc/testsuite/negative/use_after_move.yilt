@@ -1,0 +1,5 @@
+// Use-after-move: moving a table and then using the source should error
+fn main()
+    let a = {"k": 1, "v": 2}
+    let b = a
+    print(a)

@@ -1,0 +1,2 @@
+// const with a non-literal value (function call) should fail
+const x = abs(-1)

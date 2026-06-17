@@ -1,0 +1,16 @@
+// Test: generic function called with same type argument at multiple sites
+// Each call site should produce a separate monomorphized instance.
+// Expected output: 10
+//                  3.14
+//                  10
+//                  3.14
+
+fn double[T](x T) T
+    return x + x
+
+fn main()
+    print(double[int](5))
+    print(double[fp](1.57))
+    // Same types again — should reuse existing monomorphized instance
+    print(double[int](5))
+    print(double[fp](1.57))

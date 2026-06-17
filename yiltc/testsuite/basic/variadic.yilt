@@ -1,0 +1,53 @@
+// Test variadic function declarations and calls
+
+// Basic variadic: sum of integers
+fn sum(base int, nums ...int) int
+    let total = base
+    let i = 0
+    while i < len(nums)
+        total = total + nums[i]
+        i = i + 1
+    return total
+
+// Variadic with no fixed params
+fn count_items(items ...int) int
+    return len(items)
+
+// Variadic with string payload
+fn join_all(sep str, parts ...str) str
+    // Simple concatenation (no sep insertion — just test it compiles)
+    let result = ""
+    let i = 0
+    while i < len(parts)
+        result = result + parts[i]
+        i = i + 1
+    return result
+
+// Variadic with no args passed
+fn empty_variadic(nums ...int) int
+    return len(nums)
+
+pub fn main()
+    // Call with 0 extra args (only base)
+    let a = sum(10)
+    print(a)
+
+    // Call with extra args
+    let b = sum(0, 1, 2, 3)
+    print(b)
+
+    // Call with many extra args
+    let c = sum(100, 1, 2, 3, 4, 5)
+    print(c)
+
+    // No fixed params, only variadic
+    let d = count_items(10, 20, 30)
+    print(d)
+
+    // No args at all to variadic
+    let e = empty_variadic()
+    print(e)
+
+    // String variadic
+    let f = join_all("-", "a", "b", "c")
+    print(f)

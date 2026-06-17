@@ -1,0 +1,18 @@
+fn main()
+    let t = true and true
+    let f = true and false
+    let t2 = false or true
+    let f2 = false or false
+    let n = not true
+    let n2 = not false
+
+    let a = 5 > 3 and 10 < 20
+    let b = 1 == 2 or 3 != 4
+
+    let mut x = 0
+    let mut called = false
+    if true or called
+        x = 1
+
+    if false and called
+        x = 2

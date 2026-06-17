@@ -1,0 +1,17 @@
+// Test: enum destructuring with function calls using bound variable
+
+enum Maybe
+    Just(str)
+    Nothing
+
+fn greet(m Maybe)
+    match m
+        case Maybe.Just(name)
+            println("Hello, " + name + "!")
+        case Maybe.Nothing
+            println("Hello, stranger!")
+
+fn main()
+    greet(Maybe.Just("Alice"))
+    greet(Maybe.Just("Bob"))
+    greet(Maybe.Nothing)

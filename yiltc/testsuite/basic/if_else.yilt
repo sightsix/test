@@ -1,0 +1,35 @@
+fn main()
+    let x = 10
+
+    if x > 5
+        let a = 1
+    but x < 3
+        let b = 2
+    but x == 10
+        let c = 3
+    else
+        let d = 4
+
+    if true
+        let e = 5
+
+    if false
+        let f = 6
+    else
+        let g = 7
+
+    let y = 15
+    if y > 20
+        let h = 8
+    but y > 10
+        let i = 9
+    else
+        let j = 10
+
+    if false
+        if true
+            let k = 11
+        else
+            let l = 12
+    else
+        let m = 13

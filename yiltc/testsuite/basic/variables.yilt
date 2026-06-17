@@ -1,0 +1,21 @@
+fn main()
+    let x = 10
+    let y = 20
+    let z = x + y
+
+    let mut counter = 0
+    counter = counter + 1
+    counter = counter + 1
+    counter = counter + 1
+
+    let name = "hello"
+    let greeting = name
+
+    let flag = true
+    let noflag = false
+
+    let nothing = nil
+
+    let a = 1
+    let b = a
+    let c = a + b

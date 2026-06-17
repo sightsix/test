@@ -1,0 +1,11 @@
+// Test: generic swap function with two type parameters
+// Expected output: world
+//                  42
+
+fn swap[T, U](a T, b U) (U, T)
+    return (b, a)
+
+fn main()
+    let (x, y) = swap[str, int]("world", 42)
+    print(x)
+    print(y)

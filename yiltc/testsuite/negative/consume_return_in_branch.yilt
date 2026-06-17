@@ -1,0 +1,9 @@
+// Consume (return) in one branch, then use after merge — should error
+fn main()
+    let a = "hello"
+    let x = 1
+    if x == 1
+        return a
+    else
+        print(a)
+    print(a)

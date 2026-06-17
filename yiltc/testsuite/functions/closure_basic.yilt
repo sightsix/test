@@ -1,0 +1,30 @@
+fn main()
+    // Test 1: Non-capturing closure with two params
+    let add = fn(x, y)
+        return x + y
+    print(add(3, 4))
+    print(add(0, 0))
+    print(add(-1, 1))
+
+    // Test 2: Non-capturing closure with one param
+    let double = fn(x)
+        return x * 2
+    print(double(21))
+
+    // Test 3: Non-capturing closure called immediately
+    let a = (fn(x)
+        return x + 1
+    )(10)
+    print(a)
+
+    // Test 4: Closure that ignores params
+    let always42 = fn(x, y, z)
+        return 42
+    print(always42(1, 2, 3))
+
+    // Test 5: Nested closure calls
+    let add1 = fn(x)
+        return x + 1
+    let add3 = fn(x)
+        return add1(add1(add1(x)))
+    print(add3(0))

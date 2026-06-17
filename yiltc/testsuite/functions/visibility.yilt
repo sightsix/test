@@ -1,0 +1,19 @@
+fn main()
+    pub fn exported()
+        let x = 1
+
+    let a = exported()
+    let b = private_fn()
+
+pub fn exported()
+    return 42
+
+fn private_fn()
+    return 10
+
+pub fn add(a, b)
+    return a + b
+
+pub fn greet(name)
+    print("hello " + name)
+    return 0

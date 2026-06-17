@@ -1,0 +1,3 @@
+fn foo()
+    if 42
+        print("nope")

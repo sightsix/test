@@ -1,0 +1,6 @@
+// Double-move: moving a value twice should error
+fn main()
+    let a = {}
+    let b = a
+    let c = a
+    print(b)

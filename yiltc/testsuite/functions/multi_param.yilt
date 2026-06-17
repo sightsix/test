@@ -1,0 +1,24 @@
+fn main()
+    let a = default_args()
+    let b = calc(10)
+    let c = variadic_like(1, 2, 3)
+
+fn default_args()
+    return 42
+
+fn calc(x)
+    let y = x * 2
+    let z = y + 10
+    return z
+
+fn variadic_like(a, b, c)
+    return a + b + c
+
+fn chain1(x)
+    return chain2(x + 1)
+
+fn chain2(x)
+    return chain3(x * 2)
+
+fn chain3(x)
+    return x - 5

@@ -1,0 +1,5 @@
+fn main()
+    let data = {"key": "value"}
+    let encoded = json.encode(data)
+    let decoded = json.decode("{\"a\":1}")
+    let str = json.stringify({"x": 42})

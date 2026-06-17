@@ -1,0 +1,18 @@
+// String for-in iteration: iterate over byte indices of a string
+fn main()
+    // Basic string iteration (byte indices)
+    let s = "abc"
+    for i in s
+        print(i)
+    print("x")
+
+    // Empty string
+    for i in ""
+        print(999)
+    print("empty")
+
+    // String with variable
+    let name = "hello"
+    for i in name
+        if i == 0
+            print(i)

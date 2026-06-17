@@ -1,0 +1,27 @@
+// Test: closure return type inference
+// Closures without explicit return type annotations should infer from body returns.
+// Previously defaulted to void, causing "void operand" errors.
+
+fn main()
+    // Test 1: identity closure with untyped param
+    let id = fn(x)
+        return x
+    let a = id(42)
+    println(a)
+
+    // Test 2: closure returning literal
+    let get_val = fn()
+        return 99
+    println(get_val())
+
+    // Test 3: closure with typed param, inferred return
+    let double = fn(n int)
+        return n * 2
+    println(double(5))
+
+    // Test 4: recursive closure (fibonacci)
+    let fib = fn(n int) int
+        if n <= 1
+            return n
+        return fib(n - 1) + fib(n - 2)
+    println(fib(10))

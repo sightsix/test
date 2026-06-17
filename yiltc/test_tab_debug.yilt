@@ -1,0 +1,4 @@
+fn main()
+    let mut t = {}
+    t[0] = 42
+    print(t[0])

@@ -1,0 +1,10 @@
+// Negative test: unknown variant in valid enum type
+
+enum Color
+    Red
+    Green
+    Blue
+
+pub fn main()
+    let c = Color.Yellow
+    print(c)

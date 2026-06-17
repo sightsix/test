@@ -1,0 +1,9 @@
+// Error: non-constant default value (function call)
+fn get_val() int
+    return 42
+
+fn compute(x int = get_val()) int
+    return x
+
+fn main()
+    print(compute(5))

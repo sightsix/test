@@ -1,0 +1,5 @@
+// Use-after-move for strings
+fn main()
+    let s = "hello"
+    let t = s
+    print(s)

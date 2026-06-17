@@ -1,0 +1,21 @@
+fn main()
+    let s = "hello world"
+    let len = s.len()
+    let upper = s.upper()
+    let lower = s.lower()
+    let trimmed = "  spaces  ".trim()
+    let sub = s.substr(0, 5)
+    let has = s.contains("world")
+    let starts = s.starts_with("hello")
+    let ends = s.ends_with("world")
+    let idx = s.find("world")
+
+    let a = "hello"
+    let b = " " + "world"
+    let c = a + b
+
+    let empty = ""
+    let elen = empty.len()
+
+    let nums = "1,2,3"
+    let parts = nums.split(",")

@@ -1,0 +1,62 @@
+// Comprehensive enum test: nested usage, enums in tables, multiple enums
+
+enum Status
+    Active
+    Inactive
+    Pending
+
+enum Priority
+    Low
+    Medium
+    High
+
+pub fn main()
+    // Store enums in a table
+    let tasks = {}
+    tasks[0] = Status.Active
+    tasks[1] = Status.Inactive
+    tasks[2] = Priority.High
+
+    // Retrieve and match
+    let s = tasks[0]
+    match s
+        case Status.Active
+            print(1)
+        case Status.Inactive
+            print(2)
+        case Status.Pending
+            print(3)
+        default
+            print(0)
+
+    // Function returning different enum variants
+    let a = get_status(true)
+    let b = get_status(false)
+    match a
+        case Status.Active
+            print(10)
+        default
+            print(0)
+    match b
+        case Status.Inactive
+            print(20)
+        default
+            print(0)
+
+    // Multiple match statements in sequence
+    let p = Priority.Medium
+    match p
+        case Priority.Low
+            print(1)
+        case Priority.Medium
+            print(2)
+        case Priority.High
+            print(3)
+        default
+            print(0)
+
+fn get_status(active bool) Status
+    if active
+        return Status.Active
+    else
+        return Status.Inactive

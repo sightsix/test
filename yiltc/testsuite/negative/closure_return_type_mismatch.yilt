@@ -1,0 +1,7 @@
+// Negative test: return type mismatch inside an explicitly-typed closure.
+// The closure declares -> int but returns a string.
+
+fn main()
+    let f = fn() int
+        return "not an int"
+    println(f())

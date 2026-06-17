@@ -1,0 +1,10 @@
+// Negative test: providing payload to a simple (no-payload) variant
+
+enum Color
+    Red
+    Green
+    Blue
+
+pub fn main()
+    let c = Color.Red(42)
+    print(c)
