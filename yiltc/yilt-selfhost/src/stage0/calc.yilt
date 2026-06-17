@@ -34,27 +34,27 @@
 // Section 1: Token kinds (integer constants)
 // ---------------------------------------------------------------------------
 
-const T_EOF = 0
-const T_INT = 1
-const T_IDENT = 2
-const T_PLUS = 3
-const T_MINUS = 4
-const T_STAR = 5
-const T_SLASH = 6
-const T_PERCENT = 7
-const T_LPAREN = 8
-const T_RPAREN = 9
-const T_EQ = 10
-const T_NEQ = 11
-const T_LT = 12
-const T_LE = 13
-const T_GT = 14
-const T_GE = 15
-const T_AND = 16      // keyword 'and'
-const T_OR = 17       // keyword 'or'
-const T_NOT = 18      // keyword 'not'
-const T_TRUE = 19
-const T_FALSE = 20
+let T_EOF = 0
+let T_INT = 1
+let T_IDENT = 2
+let T_PLUS = 3
+let T_MINUS = 4
+let T_STAR = 5
+let T_SLASH = 6
+let T_PERCENT = 7
+let T_LPAREN = 8
+let T_RPAREN = 9
+let T_EQ = 10
+let T_NEQ = 11
+let T_LT = 12
+let T_LE = 13
+let T_GT = 14
+let T_GE = 15
+let T_AND = 16      // keyword 'and'
+let T_OR = 17       // keyword 'or'
+let T_NOT = 18      // keyword 'not'
+let T_TRUE = 19
+let T_FALSE = 20
 
 // ---------------------------------------------------------------------------
 // Section 2: Data types (structs)

@@ -1,2 +1,3 @@
-// const with a non-literal value (function call) should fail
-const x = abs(-1)
+// Top-level let with a non-const-expr value (function call) should fail.
+// `const` keyword has been removed (D001); `let` at top-level replaces it.
+let x = abs(-1)

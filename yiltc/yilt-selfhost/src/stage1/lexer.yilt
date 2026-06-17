@@ -40,109 +40,109 @@
 // streams.  This is critical for Stage 2 (the parser) which will consume
 // either.
 
-const T_EOF = 0
-const T_IDENT = 1
-const T_INT_LIT = 2
-const T_FLOAT_LIT = 3
-const T_STRING_LIT = 4
-const T_NIL = 5
+let T_EOF = 0
+let T_IDENT = 1
+let T_INT_LIT = 2
+let T_FLOAT_LIT = 3
+let T_STRING_LIT = 4
+let T_NIL = 5
 
 // Keywords
-const T_LET = 6
-const T_MUT = 7
-const T_FN = 8
-const T_EXTERN = 9
-const T_PUB = 10
-const T_USE = 11
-const T_FROM = 12
-const T_FOR = 13
-const T_IN = 14
-const T_IF = 15
-const T_BUT = 16
-const T_ELSE = 17
-const T_WHILE = 18
-const T_MATCH = 19
-const T_CASE = 20
-const T_DEFAULT = 21
-const T_RETURN = 22
-const T_BREAK = 23
-const T_CONTINUE = 24
-const T_SPAWN = 25
-const T_AWAIT = 26
-const T_CONST = 27
-const T_ASSERT = 28
-const T_STRUCT = 29
-const T_ENUM = 30
+let T_LET = 6
+let T_MUT = 7
+let T_FN = 8
+let T_EXTERN = 9
+let T_PUB = 10
+let T_USE = 11
+let T_FROM = 12
+let T_FOR = 13
+let T_IN = 14
+let T_IF = 15
+let T_BUT = 16
+let T_ELSE = 17
+let T_WHILE = 18
+let T_MATCH = 19
+let T_CASE = 20
+let T_DEFAULT = 21
+let T_RETURN = 22
+let T_BREAK = 23
+let T_CONTINUE = 24
+let T_SPAWN = 25
+let T_AWAIT = 26
+let T_CONST = 27
+let T_ASSERT = 28
+let T_STRUCT = 29
+let T_ENUM = 30
 
 // Operators
-const T_PLUS = 31
-const T_MINUS = 32
-const T_STAR = 33
-const T_SLASH = 34
-const T_PERCENT = 35
-const T_AMP = 36
-const T_PIPE = 37
-const T_CARET = 38
-const T_TILDE = 39
-const T_LSHIFT = 40
-const T_RSHIFT = 41
-const T_EQ = 42          // ==
-const T_NEQ = 43         // !=
-const T_LT = 44
-const T_LE = 45
-const T_GT = 46
-const T_GE = 47
-const T_ASSIGN = 48      // =
-const T_PLUS_EQ = 49
-const T_MINUS_EQ = 50
-const T_STAR_EQ = 51
-const T_SLASH_EQ = 52
-const T_PERCENT_EQ = 53
-const T_AMP_EQ = 54
-const T_PIPE_EQ = 55
-const T_CARET_EQ = 56
-const T_SHL_EQ = 57
-const T_SHR_EQ = 58
-const T_QUESTION = 59    // ?
+let T_PLUS = 31
+let T_MINUS = 32
+let T_STAR = 33
+let T_SLASH = 34
+let T_PERCENT = 35
+let T_AMP = 36
+let T_PIPE = 37
+let T_CARET = 38
+let T_TILDE = 39
+let T_LSHIFT = 40
+let T_RSHIFT = 41
+let T_EQ = 42          // ==
+let T_NEQ = 43         // !=
+let T_LT = 44
+let T_LE = 45
+let T_GT = 46
+let T_GE = 47
+let T_ASSIGN = 48      // =
+let T_PLUS_EQ = 49
+let T_MINUS_EQ = 50
+let T_STAR_EQ = 51
+let T_SLASH_EQ = 52
+let T_PERCENT_EQ = 53
+let T_AMP_EQ = 54
+let T_PIPE_EQ = 55
+let T_CARET_EQ = 56
+let T_SHL_EQ = 57
+let T_SHR_EQ = 58
+let T_QUESTION = 59    // ?
 
 // Delimiters
-const T_LPAREN = 60      // (
-const T_RPAREN = 61      // )
-const T_LBRACE = 62      // {
-const T_RBRACE = 63      // }
-const T_LBRACK = 64      // [
-const T_RBRACK = 65      // ]
-const T_COMMA = 66       // ,
-const T_PERIOD = 67      // .
-const T_COLON = 68       // :
-const T_DOTDOT = 69      // ..
-const T_DOTDOTDOT = 70   // ...
-const T_ARROW = 71       // ->
+let T_LPAREN = 60      // (
+let T_RPAREN = 61      // )
+let T_LBRACE = 62      // {
+let T_RBRACE = 63      // }
+let T_LBRACK = 64      // [
+let T_RBRACK = 65      // ]
+let T_COMMA = 66       // ,
+let T_PERIOD = 67      // .
+let T_COLON = 68       // :
+let T_DOTDOT = 69      // ..
+let T_DOTDOTDOT = 70   // ...
+let T_ARROW = 71       // ->
 
 // Increment/decrement
-const T_PLUS_PLUS = 72   // ++
-const T_MINUS_MINUS = 73 // --
+let T_PLUS_PLUS = 72   // ++
+let T_MINUS_MINUS = 73 // --
 
 // Literals
-const T_TRUE = 74
-const T_FALSE = 75
-const T_AND = 76         // and
-const T_OR = 77          // or
-const T_NOT = 78         // not
+let T_TRUE = 74
+let T_FALSE = 75
+let T_AND = 76         // and
+let T_OR = 77          // or
+let T_NOT = 78         // not
 
 // Interpolated string (f"...")
-const T_INTERP_STR = 79
+let T_INTERP_STR = 79
 
 // Character literal 'c'
-const T_CHAR_LIT = 80
+let T_CHAR_LIT = 80
 
 // Pseudo-tokens for indentation (not emitted by the Go lexer's token stream
 // directly — the Go lexer uses a separate IndentToken array.  For Stage 1
 // we fold them into the main token stream to simplify downstream parsing).
-const T_INDENT = 81
-const T_DEDENT = 82
-const T_NEWLINE = 83
-const T_SEMICOLON = 84  // ';' — not used by Yilt but emitted for safety
+let T_INDENT = 81
+let T_DEDENT = 82
+let T_NEWLINE = 83
+let T_SEMICOLON = 84  // ';' — not used by Yilt but emitted for safety
 
 // ---------------------------------------------------------------------------
 // Section 2: Data structures
@@ -312,8 +312,7 @@ fn keyword_kind(text str) int
         return T_SPAWN
     if text == "await"
         return T_AWAIT
-    if text == "const"
-        return T_CONST
+    // 'const' removed (D001): everything is immutable by default, `mut` opts in.
     if text == "assert"
         return T_ASSERT
     if text == "struct"

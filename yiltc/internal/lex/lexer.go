@@ -669,7 +669,6 @@ var keywords = map[string]ast.Token{
         "true":    ast.TTrue,
         "false":   ast.TFalse,
         "nil":     ast.TNil,
-        "const":   ast.TConst,
         "assert":  ast.TAssert,
         "struct":  ast.TStruct,
         "enum":    ast.TEnum,

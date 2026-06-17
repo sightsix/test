@@ -122,21 +122,6 @@ func (p *Parser) ParseFile() *ast.File {
 func (p *Parser) parseTopLevel() ast.Decl {
         tok := p.peek()
         switch tok.Kind {
-        case ast.TConst:
-                // Top-level const declaration
-                pos := p.posAST()
-                p.advance() // const
-                name := p.expect(ast.TIdent)
-                if name == nil {
-                        return nil
-                }
-                p.expect(ast.TAssign)
-                value := p.parseExpr()
-                return &ast.ConstDecl{
-                        Name:  name.Value,
-                        Value: value,
-                        Span:  pos,
-                }
         case ast.TLet:
                 // Top-level let — only const-expr bindings are allowed at top level.
                 // Other let bindings are not valid top-level declarations; emit an error.
@@ -755,21 +740,6 @@ func (p *Parser) parseBlock() []ast.Stmt {
 func (p *Parser) parseStmt() ast.Stmt {
         tok := p.peek()
         switch tok.Kind {
-        case ast.TConst:
-                // Local const: const name = expr
-                pos := p.posAST()
-                p.advance() // const
-                name := p.expect(ast.TIdent)
-                if name == nil {
-                        return nil
-                }
-                p.expect(ast.TAssign)
-                value := p.parseExpr()
-                return &ast.ConstStmt{
-                        Name:  name.Value,
-                        Value: value,
-                        Span:  pos,
-                }
         case ast.TAssert:
                 return p.parseAssert()
         case ast.TLet:
