@@ -1874,6 +1874,15 @@ func (cg *CodeGen) genF32ToF64(ins *IRInstr) {
         a.CVTSS2SD(RegOp(dst), RegOp(src))
 }
 
+func (cg *CodeGen) genCopy(ins *IRInstr) {
+        a := cg.asm
+        dst := cg.getReg(ins.Dst, 64)
+        src := cg.getOperandGPR(&ins.Src[0], 64)
+        if src.Code != dst.Code {
+                a.MovRR(dst, src)
+        }
+}
+
 // ======================================================================
 // Table Operations (Runtime Helpers)
 // ======================================================================

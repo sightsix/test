@@ -989,8 +989,6 @@ func (l *lowerer) stmt(s ast.Stmt) {
                         // Mutable variables need a non-constant SSA value with
                         // its own slot that persists across loop iterations.
                         // Wrap the initial value in Or(val, 0) to force a slot.
-                        // Mark NoFold to prevent the constant folder from folding
-                        // this identity operation (which would destroy the slot).
                         zero := l.builder.ConstInt(0, "")
                         wrapped := l.builder.Or(val, zero, "mut."+s.Name)
                         l.builder.CurBlock().MarkNoFold()
