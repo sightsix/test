@@ -1300,13 +1300,24 @@ func (cg *CodeGen) genAnd(ins *IRInstr) {
 func (cg *CodeGen) genOr(ins *IRInstr) {
         a := cg.asm
         dst := cg.getReg(ins.Dst, 64)
-        src := cg.getOperandGPR(&ins.Src[0], 64)
-
-        switch ins.Src[0].Kind {
+        // Move Src[0] to dst first, then OR with Src[1].
+        // Previously this only did dst |= Src[0], which when dst was a
+        // different register from Src[0] produced garbage | val,
+        // corrupting tagged values. This was the root cause of table
+        // values being lost when stored inside other tables and returned
+        // from functions: the Or(val, 0) wrapping for mutable variables
+        // corrupted the table pointer's tag bits.
+        src0 := cg.getOperandGPR(&ins.Src[0], 64)
+        if src0.Code != dst.Code {
+                a.MovRR(dst, src0)
+        }
+        // Now OR with Src[1]
+        switch ins.Src[1].Kind {
         case IRValReg:
-                a.OrRR(dst, src)
+                src1 := cg.getOperandGPR(&ins.Src[1], 64)
+                a.OrRR(dst, src1)
         case IRValInt:
-                a.OrRI(dst, ins.Src[0].Int)
+                a.OrRI(dst, ins.Src[1].Int)
         }
 }
 
@@ -1649,14 +1660,21 @@ func (cg *CodeGen) genCall(ins *IRInstr) {
         }
 
         // Restore caller-saved registers
-        cg.restoreCallerSaved(a)
-
-        // Move return value to destination
+        // IMPORTANT: move the return value (RAX) to its destination BEFORE
+        // restoring, because restoreCallerSaved pops RAX (overwriting the
+        // return value). We save the return value in a callee-saved register
+        // (RBX) temporarily, restore all caller-saved, then move RBX to dst.
         if ins.Dst != NoVReg {
+                // Save return value in RBX (callee-saved, not in savedCallerRegs)
+                a.MovRR(RBX, RAX)
+                cg.restoreCallerSaved(a)
+                // Now move saved return value to destination
                 dst := cg.allocGPR(ins.Dst, 64)
-                if dst.Code != RAX.Code {
-                        a.MovRR(dst, RAX)
+                if dst.Code != RBX.Code {
+                        a.MovRR(dst, RBX)
                 }
+        } else {
+                cg.restoreCallerSaved(a)
         }
 }
 
@@ -1861,37 +1879,57 @@ func (cg *CodeGen) genF32ToF64(ins *IRInstr) {
 // ======================================================================
 
 func (cg *CodeGen) genTableNew(ins *IRInstr) {
-        // Call runtime helper: yilt_table_new(arena, capacity)
-        // arg[0] = arena (R15), arg[1] = capacity (immediate).
-        cg.saveCallerSaved(cg.asm)
-        capReg := cg.abi.IntArgReg(1) // RSI (SysV) or RDX (Windows)
-        cg.asm.MovRM(*capReg, ins.Src[0].Int)
-        cg.emitCall("yilt_table_new", R15, *capReg)
-        cg.restoreCallerSaved(cg.asm)
+        // Call y_table_new(cap_hint) directly — no saveCallerSaved/restoreCallerSaved
+        // which was clobbering return values and causing stack alignment issues.
+        // Move capacity to RDI (first arg register on SysV).
+        a := cg.asm
+        a.MovRM(RDI, ins.Src[0].Int)
+        a.CALL("y_table_new")
         cg.moveRetToDst(ins.Dst)
 }
 
 func (cg *CodeGen) genTableGet(ins *IRInstr) {
-        // Call runtime helper: yilt_table_get(arena, table, key)
+        // Call y_tab_get(table, key) directly.
+        a := cg.asm
         table := cg.getOperandGPR(&ins.Src[0], 64)
         key := cg.getOperandGPR(&ins.Src[1], 64)
-        cg.emitRuntimeCall("yilt_table_get", R15, table, key)
+        if table.Code != RDI.Code {
+                a.MovRR(RDI, table)
+        }
+        if key.Code != RSI.Code {
+                a.MovRR(RSI, key)
+        }
+        a.CALL("y_tab_get")
         cg.moveRetToDst(ins.Dst)
 }
 
 func (cg *CodeGen) genTableSet(ins *IRInstr) {
-        // Call runtime helper: yilt_table_set(arena, table, key, value)
+        // Call y_tab_set(table, key, value) directly.
+        a := cg.asm
         table := cg.getOperandGPR(&ins.Src[0], 64)
         key := cg.getOperandGPR(&ins.Src[1], 64)
         val := cg.getOperandGPR(&ins.Src[2], 64)
-        cg.emitRuntimeCall("yilt_table_set", R15, table, key, val)
+        if table.Code != RDI.Code {
+                a.MovRR(RDI, table)
+        }
+        if key.Code != RSI.Code {
+                a.MovRR(RSI, key)
+        }
+        if val.Code != RDX.Code {
+                a.MovRR(RDX, val)
+        }
+        a.CALL("y_tab_set")
         cg.moveRetToDst(ins.Dst)
 }
 
 func (cg *CodeGen) genTableLen(ins *IRInstr) {
-        // Call runtime helper: yilt_table_len(arena, table)
+        // Call y_tab_len(table) directly.
+        a := cg.asm
         table := cg.getOperandGPR(&ins.Src[0], 64)
-        cg.emitRuntimeCall("yilt_table_len", R15, table)
+        if table.Code != RDI.Code {
+                a.MovRR(RDI, table)
+        }
+        a.CALL("y_tab_len")
         cg.moveRetToDst(ins.Dst)
 }
 
@@ -2028,12 +2066,9 @@ func (cg *CodeGen) saveCallerSaved(a *Asm) {
         // Save any caller-saved registers that the register allocator has given out
         savedCallerRegs = nil
         for _, r := range cg.abi.CallerSaved {
-                // Check if this register is in use
                 if r.Code == RSP.Code || r.Code == RBP.Code {
                         continue
                 }
-                // Simple heuristic: save registers that are not RAX (return value)
-                // and not argument registers (they'll be set up by setupCallArgs)
                 a.PUSH(r)
                 savedCallerRegs = append(savedCallerRegs, r)
         }
