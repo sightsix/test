@@ -1,0 +1,21 @@
+fn main()
+    let a = identity(42)
+    let b = compose(double, inc)(5)
+    let c = make_adder(10)(32)
+
+fn identity(x)
+    return x
+
+fn double(x)
+    return x * 2
+
+fn inc(x)
+    return x + 1
+
+fn make_adder(n)
+    fn adder(x)
+        return x + n
+    return adder
+
+fn apply(f, x)
+    return f(x)

@@ -1,0 +1,53 @@
+// Test: enum equality
+// Two independently-constructed enum values with the same variant and payload
+// should compare equal using the structural enum comparison.
+
+enum Color
+    Red
+    Green
+    Blue
+
+enum Result
+    Ok(int)
+    Err(str)
+
+fn test_color_equality()
+    let a = Color.Red
+    let b = Color.Red
+    println(a == b)
+
+    let c = Color.Red
+    let d = Color.Blue
+    println(c == d)
+
+fn main()
+    // Test 1: same variant, no payload
+    test_color_equality()
+
+    // Test 2: different enum types should not be equal
+    let c1 = Color.Red
+    let r = Result.Ok(42)
+    // This compares different types — should work (false)
+    println(c1 == r)
+
+    // Test 3: same variant, same payload type, same value
+    let r1 = Result.Ok(10)
+    let r2 = Result.Ok(10)
+    println(r1 == r2)
+
+    // Test 4: same variant, same payload type, different value
+    let r3 = Result.Ok(10)
+    let r4 = Result.Ok(99)
+    println(r3 == r4)
+
+    // Test 5: different variants
+    let ok = Result.Ok(1)
+    let err = Result.Err("fail")
+    println(ok == err)
+
+    // Test 6: simple enum in table
+    let mut t = {}
+    t["a"] = Color.Red
+    t["b"] = Color.Green
+    println(t["a"] == Color.Red)
+    println(t["a"] == Color.Blue)

@@ -1,0 +1,5 @@
+// Negative test: unknown enum type used in variant literal
+
+pub fn main()
+    let c = UnknownType.Red
+    print(c)

@@ -1,0 +1,8 @@
+// String auto-coercion with + operator.
+fn main()
+    let a = "count: " + 42
+    let b = 3.14 + " is pi"
+    let c = "bool: " + true
+    let d = "nil: " + nil
+    let e = "hello" + " " + "world"
+    return a

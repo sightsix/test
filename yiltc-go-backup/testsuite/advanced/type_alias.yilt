@@ -1,0 +1,22 @@
+// Explicit return type and param type annotations
+fn make_age() int
+    return 25
+
+fn identity(x int) int
+    return x
+
+fn is_even(n int) bool
+    return n % 2 == 0
+
+fn main()
+    let a = make_age()
+    let n = "Alice"
+    print(n)
+    print(a)
+
+    let b = identity(42)
+    let c = is_even(4)
+    let d = is_even(7)
+    print(b)
+    print(c)
+    print(d)

@@ -1,0 +1,10 @@
+// Test 'use' declarations for stdlib modules (implicit globals)
+// Since stdlib modules are implicitly available, 'use' statements here
+// are syntactic/semantic tests — they should not produce errors.
+use sys
+use math
+
+pub fn main()
+    let args = sys.args
+    let result = math.abs(-5)
+    print(result)

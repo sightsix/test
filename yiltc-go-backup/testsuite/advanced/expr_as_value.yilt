@@ -1,0 +1,23 @@
+fn main()
+    if true
+        let x = 1
+        let y = 2
+        let z = x + y
+
+    let a = if true
+        10
+    else
+        20
+
+    let b = if false
+        30
+    but true
+        40
+    else
+        50
+
+    let c = match 42
+        case 42
+            100
+        default
+            200

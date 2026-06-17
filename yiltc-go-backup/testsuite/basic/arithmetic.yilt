@@ -1,0 +1,27 @@
+fn main()
+    let x = 2 + 3
+    let y = 10 - 4
+    let z = 3 * 7
+    let w = 20 / 4
+    let m = 17 % 5
+
+    let a = -10
+    let b = not true
+    let c = 5 << 2
+    let d = 40 >> 3
+    let e = 12 & 10
+    let f = 12 | 6
+    let g = 12 ^ 6
+    let h = ~0
+
+    let cmp1 = 5 == 5
+    let cmp2 = 3 != 4
+    let cmp3 = 2 < 5
+    let cmp4 = 5 <= 5
+    let cmp5 = 8 > 3
+    let cmp6 = 8 >= 8
+
+    let float1 = 3.14 + 1.0
+    let float2 = 10.5 - 2.5
+    let float3 = 2.5 * 4.0
+    let float4 = 10.0 / 3.0

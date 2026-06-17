@@ -1,0 +1,7 @@
+// Defer-like pattern using nested functions
+fn main()
+    fn cleanup()
+        print("cleaning up")
+    print("hello")
+    print("world")
+    cleanup()

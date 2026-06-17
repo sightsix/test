@@ -1,0 +1,6 @@
+// Error: non-default param after default param
+fn bad_order(x int = 1, y int) int
+    return x + y
+
+fn main()
+    print(bad_order(1, 2))

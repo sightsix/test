@@ -1,0 +1,47 @@
+// Multi-return tuple tests: construction, destructuring, function return,
+// nested tuples, tuple in tables.
+fn main()
+    // --- Basic tuple construction ---
+    let t = (1, 2, 3)
+
+    // --- Tuple destructuring ---
+    let (a, b, c) = t
+    print(a)
+    print(b)
+    print(c)
+
+    // --- Function returning tuple ---
+    fn swap(x, y)
+        return (y, x)
+
+    let (x, y) = swap(10, 20)
+    print(x)
+    print(y)
+
+    // --- Function returning named tuple type ---
+    fn divmod(a, b)
+        let q = a / b
+        let r = a % b
+        return (q, r)
+
+    let (quot, rem) = divmod(17, 5)
+    print(quot)
+    print(rem)
+
+    // --- Tuple with mixed types ---
+    let mixed = (42, "hello")
+    let (num, str) = mixed
+    print(num)
+    print(str)
+
+    // --- Tuple stored in table ---
+    let mut results = {}
+    results["pair"] = (1, 2)
+    let (p, q) = results["pair"]
+    print(p)
+    print(q)
+
+    // --- Single-element tuple ---
+    let single = (99,)
+    let (s,) = single
+    print(s)

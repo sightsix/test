@@ -1,0 +1,64 @@
+// Test basic enum declaration, construction, and match
+
+enum Color
+    Red
+    Green
+    Blue
+
+enum Direction
+    Up
+    Down
+    Left
+    Right
+
+pub fn main()
+    // Simple enum construction
+    let c = Color.Red
+    let d = Direction.Up
+
+    // Match on simple enum
+    match c
+        case Color.Red
+            print(1)
+        case Color.Green
+            print(2)
+        case Color.Blue
+            print(3)
+        default
+            print(0)
+
+    // Match with default for non-exhaustive
+    let d2 = Direction.Down
+    match d2
+        case Direction.Up
+            print(10)
+        case Direction.Down
+            print(20)
+        default
+            print(99)
+
+    // Enum as function parameter
+    let result = describe(c)
+    print(result)
+
+    // Enum as function return value
+    let c2 = make_color()
+    match c2
+        case Color.Red
+            print(100)
+        default
+            print(0)
+
+fn describe(c Color) str
+    match c
+        case Color.Red
+            return "red"
+        case Color.Green
+            return "green"
+        case Color.Blue
+            return "blue"
+        default
+            return "unknown"
+
+fn make_color() Color
+    return Color.Green

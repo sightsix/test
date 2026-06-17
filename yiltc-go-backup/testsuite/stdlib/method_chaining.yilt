@@ -1,0 +1,9 @@
+fn main()
+    let s = "hello world"
+    let upper = s.upper()
+    let trimmed = s.trim()
+    let sub = s.substr(0, 5)
+    let found = s.contains("world")
+    print(upper)
+    print(trimmed)
+    print(sub)

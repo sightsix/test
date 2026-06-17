@@ -1,0 +1,56 @@
+// Test enum variants with payloads
+// Note: parser supports single-payload variants only (e.g., Ok(int)).
+
+enum Result
+    Ok(int)
+    Err(str)
+
+enum Option
+    Some(int)
+    None
+
+pub fn main()
+    // Construct payload variant
+    let r = Result.Ok(42)
+    let e = Result.Err("something failed")
+    let n = Option.None
+    let s = Option.Some(100)
+
+    // Match on payload enum — bind the payload to a variable.
+    match r
+        case Result.Ok(v1)
+            print(v1)
+        case Result.Err(msg1)
+            print(msg1)
+        default
+            print(0)
+
+    match e
+        case Result.Ok(v2)
+            print(v2)
+        case Result.Err(msg2)
+            print(msg2)
+        default
+            print(0)
+
+    // Match with default
+    match n
+        case Option.Some(v3)
+            print(v3)
+        case Option.None
+            print(20)
+        default
+            print(99)
+
+    // Enum in a function
+    let val = unwrap(s)
+    print(val)
+
+fn unwrap(opt Option) int
+    match opt
+        case Option.Some(v)
+            return v
+        case Option.None
+            return -1
+        default
+            return -2

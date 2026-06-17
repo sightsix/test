@@ -1,0 +1,20 @@
+fn main()
+    let mut i = 0
+    while i < 10
+        i = i + 1
+
+    let mut sum = 0
+    let mut j = 1
+    while j <= 100
+        sum = sum + j
+        j = j + 1
+
+    let mut found = false
+    let mut n = 2
+    while not found
+        if n * n > 50
+            found = true
+        n = n + 1
+
+    while false
+        let x = 1

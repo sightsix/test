@@ -1,0 +1,3 @@
+// Unknown type annotation should fail
+fn main()
+    let x xyz = 10

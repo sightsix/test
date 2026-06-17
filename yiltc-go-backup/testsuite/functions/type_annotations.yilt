@@ -1,0 +1,11 @@
+fn main()
+    let a = add(3, 4)
+
+fn add(x int, y int) int
+    return x + y
+
+fn no_return()
+    let x = 1
+
+fn typed_params(x int, y int, z str) str
+    return z

@@ -1,0 +1,8 @@
+// Negative test: struct field typo should trigger "did you mean?" suggestion
+struct Point
+    mut x int
+    mut y int
+
+fn main()
+    let p = Point{x: 10, y: 20}
+    print(p.z)

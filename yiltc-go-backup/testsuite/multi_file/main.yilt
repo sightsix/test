@@ -1,0 +1,9 @@
+// Multi-file import test: main file imports from utils module
+
+use utils
+
+pub fn main()
+    let result = utils.add(3, 4)
+    print(result)
+    let msg = utils.greet("World")
+    print(msg)

@@ -1,0 +1,16 @@
+// Negative test: duplicate enum variant in match
+
+enum Color
+    Red
+    Green
+    Blue
+
+pub fn main()
+    let c = Color.Red
+    match c
+        case Color.Red
+            print(1)
+        case Color.Red
+            print(2)
+        default
+            print(0)

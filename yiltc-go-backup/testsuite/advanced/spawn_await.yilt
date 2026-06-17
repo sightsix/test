@@ -1,0 +1,6 @@
+fn main()
+    let h = spawn compute(42)
+    let result = await h
+
+fn compute(n)
+    return n * 2

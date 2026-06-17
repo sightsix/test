@@ -1,0 +1,4 @@
+// Negative: power operator `**` is not supported.
+fn main()
+    let x = 2 ** 10
+    print(x)

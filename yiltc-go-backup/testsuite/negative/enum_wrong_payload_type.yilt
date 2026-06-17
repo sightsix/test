@@ -1,0 +1,9 @@
+// Negative test: wrong payload type for enum variant
+
+enum Result
+    Ok(int)
+    Err(str)
+
+pub fn main()
+    let r = Result.Ok("not an int")
+    print(r)

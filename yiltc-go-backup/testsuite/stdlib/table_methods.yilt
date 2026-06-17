@@ -1,0 +1,6 @@
+fn main()
+    let t = {}
+    t.set("key", "value")
+    let v = t.get("key")
+    let h = t.has("key")
+    let l = t.len()

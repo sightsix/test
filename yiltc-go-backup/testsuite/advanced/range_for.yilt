@@ -1,0 +1,32 @@
+// Range-for loops: for i in 0..N syntax
+fn main()
+    // Basic range iteration
+    for i in 0..5
+        print(i)
+
+    // Range with computed bounds
+    let n = 3
+    for j in 0..n
+        print(j)
+
+    // Range with non-zero lower bound
+    for k in 3..6
+        print(k)
+
+    // Accumulate sum via range
+    let mut total = 0
+    for i in 0..10
+        total = total + i
+    print(total)
+
+    // Nested range loops
+    for i in 0..3
+        for j in 0..2
+            let x = i * 2 + j
+            print(x)
+
+    // Range with variable lower bound
+    let start = 7
+    let end = 10
+    for i in start..end
+        print(i)

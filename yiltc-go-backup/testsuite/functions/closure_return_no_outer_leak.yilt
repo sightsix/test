@@ -1,0 +1,15 @@
+// Test: return inside closure should not be validated against outer function's return type.
+// Previously, `return "hello"` inside a closure would error if the outer function
+// returns int.
+
+fn make_closure() int
+    // This closure returns str, but the outer function returns int.
+    // The return inside the closure should NOT be checked against outer fn.
+    let f = fn()
+        return "hello"
+    println(f())
+    return 42
+
+fn main()
+    let x = make_closure()
+    println(x)

@@ -1,0 +1,8 @@
+// Negative test: variadic argument type mismatch
+
+fn sum_all(nums ...int) int
+    return 0
+
+pub fn main()
+    let result = sum_all(1, 2, "not an int")
+    print(result)
