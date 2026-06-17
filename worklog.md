@@ -370,3 +370,65 @@ Next steps (suggested):
 3. Implement the AArch64 and RISC-V linkers (codegen works, but linkers don't produce binaries yet).
 4. Add more end-to-end execution tests (not just compile-and-check) — the existing TestExecSuite pattern can be extended.
 5. Add more diagnostic-quality tests using the diag_render_test.go pattern (cover type mismatches, ownership errors, etc.).
+
+---
+Task ID: 15-yilt-selfhost-stage0
+Agent: main (Super Z)
+Task: Begin the yilt-selfhost project — write a compiler in Yilt itself.
+
+Work Log:
+- Backed up the Go implementation to /home/z/my-project/yiltc-go-backup/ and tagged v0.1-go-impl in git.
+- Audited which Yilt features actually work end-to-end (many were listed as broken in the old README but have since been fixed):
+  - print of strings: WORKS
+  - string concat: WORKS
+  - table literal with multiple entries: WORKS
+  - for-in over table: BROKEN (iterates 0 times) — workaround: use int-keyed table + while loop
+  - struct with mutable fields: WORKS
+  - struct field access: WORKS
+  - string.bytes(): WORKS (returns table of byte values)
+  - string.substr(start, end): WORKS
+  - string.len(): WORKS
+  - table.has(key): WORKS (returns true/nil)
+  - table.len(): WORKS
+  - int-keyed table as array: WORKS
+  - fs.read(path): BROKEN (returns 0) — known issue, fs.read_text vs fs.read mismatch
+  - sys.args: BROKEN (returns empty table) — known issue
+
+- Designed the bootstrap strategy (5 stages):
+  Stage 0: Expression calculator (lexer + Pratt parser + evaluator)
+  Stage 1: Full Yilt lexer
+  Stage 2: Full Yilt parser
+  Stage 3: Type checker
+  Stage 4: Code generator
+  Stage 5: Self-compilation fixpoint
+
+- Wrote Stage 0 in yilt-selfhost/src/stage0/calc.yilt (~500 lines of Yilt):
+  - Lexer: tokenises integers, identifiers, keywords (and/or/not/true/false), operators (+, -, *, /, %, ==, !=, <, <=, >, >=), parens
+  - Pratt parser: full operator precedence chain (or < and < eq < cmp < add < mul < unary < primary)
+  - Tree-walking evaluator: handles all operators including short-circuit and/or, unary not/minus
+  - 17 test cases covering: basic arithmetic, precedence, parens, left-assoc, division, modulo, comparisons, equality, boolean ops, unary, nested expressions
+
+- Compiled Stage 0 with the Go yiltc — it compiles cleanly and produces a working ELF x86_64 binary.
+
+- Initial run produced wrong results (all expressions returned 0). Investigated and found FIVE runtime bugs:
+
+  Bug 1: String equality (`==` on `str`) used bitwise comparison (pointer identity). Two separate allocations of "int" were never equal. Fix: `==` and `!=` on strings now call `pure_values_equal` for content comparison.
+
+  Bug 2: Boolean NOT (`not` on `bool`) used bitwise NOT (`~x`) which corrupts tag bits. Yilt bools are tagged: true = (2<<56)|1, false = (2<<56)|0. Bitwise NOT of false = 0xFDFFFFFFFFFFFFFF (garbage). Fix: `not` on bools now uses `XOR x, 1` to flip only the payload bit.
+
+  Bug 3: Short-circuit AND used `b.Not(left)` (bitwise) to check if left was false. Same tag-corruption bug as #2. Fix: branch directly on `left` instead of `Not(left)`.
+
+  Bug 4: Conditional branch (`genCondJump`) used `TEST cond, cond` which checks if the full 64-bit value is non-zero. But tagged false = 0x0200000000000000 IS non-zero (tag byte is 0x02)! So `if false` always took the true branch. Fix: `TEST cond, 1` checks only the payload bit.
+
+  Bug 5: memcmp in `pure_values_equal` emitted `0xF2 0xA6` (REPNE CMPSB) instead of `0xF3 0xA6` (REPE CMPSB). REPNE stops at the first MATCHING byte, so "abc"=="abd" returned true. Fix: use REPE which stops at the first MISMATCH.
+
+- After fixing all five bugs, Stage 0 produces correct results for all 17 test cases.
+
+- All 240 Go tests still pass (no regressions from the runtime fixes).
+
+Stage Summary:
+- Stage 0 of the yilt-selfhost bootstrap is COMPLETE.
+- The Yilt compiler can now express real compiler infrastructure (lexer, parser, evaluator) in Yilt itself.
+- Five runtime bugs were found and fixed during this work — these bugs hadn't been caught by the existing test suite because the tests didn't exercise string equality, boolean NOT, short-circuit AND/OR, or conditional branches with tagged bools in combination.
+- The Go implementation is backed up at /home/z/my-project/yiltc-go-backup/ and tagged v0.1-go-impl.
+- Next: Stage 1 (full Yilt lexer) — extend the Stage 0 lexer to handle all Yilt tokens (keywords, string literals, f-strings, indentation, comments).

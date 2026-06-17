@@ -2,70 +2,157 @@
 
 > A Yilt-to-Yilt compiler: the Yilt compiler rewritten **in Yilt itself**.
 
-## Status: Planning Phase
+## Status: Stage 0 Complete
 
-This project rewrites the Go-based `yiltc` compiler as a native Yilt program
-that can compile Yilt source code to x86-64 ELF binaries. The output of this
-compiler should be byte-for-byte compatible with (or functionally equivalent to)
-the output of the Go-based `yiltc`.
+Stage 0 is a working expression calculator (lexer + Pratt parser + tree-walking
+evaluator) written entirely in Yilt, compiled by the Go-based `yiltc`, and
+producing correct results for all 17 test cases.
+
+## Quick Start
+
+```bash
+cd /home/z/my-project/yiltc
+./bin/yiltc yilt-selfhost/src/stage0/calc.yilt -o /tmp/stage0 --quiet
+/tmp/stage0
+```
+
+Expected output:
+```
+=== Yilt Self-Host Stage 0: Expression Calculator ===
+1 + 2 => 3
+2 + 3 * 4 => 14
+(2 + 3) * 4 => 20
+2 + 3 * (4 - 1) => 11
+10 - 2 - 3 => 5
+100 / 7 => 14
+100 % 7 => 2
+2 < 3 => 1
+3 < 2 => 0
+1 == 1 => 1
+1 != 2 => 1
+true and false => 0
+true or false => 1
+not true => 0
+-5 + 10 => 5
+2 + 3 == 5 => 1
+(1 + 2) * (3 + 4) - 10 => 11
+=== Stage 0 complete ===
+```
 
 ## Architecture
-yilt-selfhost/ ├── src/ │ ├── main.ylt # Entry point, CLI argument
-parsing │ ├── lexer.ylt # Tokenizer (characters → tokens) │ ├──
-parser.ylt # Parser (tokens → AST) │ ├── checker.ylt # Type checker (AST
-→ typed AST) │ ├── ir.ylt # IR generation (typed AST → IR) │ ├──
-optimize.ylt # IR optimization passes │ ├── codegen.ylt # x86_64 machine
-code emission │ ├── linker.ylt # ELF64 linking │ └── runtime.ylt #
-Runtime ABI definitions ├── tests/ │ ├── lexer_test.ylt │ ├──
-parser_test.ylt │ └── e2e_test.ylt └── README.md
+
+```
+yilt-selfhost/
+├── README.md                      # this file
+└── src/
+    └── stage0/
+        └── calc.yilt              # Stage 0: expression calculator
+```
+
+### Stage 0 (`calc.yilt`) — ~500 lines of Yilt
+
+A complete expression calculator demonstrating:
+
+1. **Lexer** (`lex_all`, `lex_one`, `lex_number`, `lex_ident`)
+   - Character classification (`is_digit`, `is_alpha`, `is_alnum`)
+   - Tokenises integers, identifiers, keywords, operators, parens
+   - Tracks line/column for future diagnostics
+   - Returns tokens as a table of `Token` structs (integer-keyed)
+
+2. **Pratt Parser** (`parse_expr` → `parse_or` → `parse_and` → ... → `parse_primary`)
+   - Full operator precedence: `or` < `and` < `==`/`!=` < `<`/`<=`/`>`/`>=` < `+`/`-` < `*`/`/`/`%` < unary
+   - Left-associative binary operators
+   - Right-associative unary operators (`-`, `not`)
+   - Parenthesised sub-expressions
+   - AST nodes are `Node` structs with a `kind` string discriminator
+
+3. **Tree-Walking Evaluator** (`eval`)
+   - Recursively evaluates the AST
+   - Handles all operators: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `and`, `or`, `not`, unary `-`
+   - Returns integers (0 = false, 1 = true for boolean ops)
+
+### Data Structures Used
+
+Yilt doesn't yet support recursive struct types (a struct field can't hold
+another struct of the same type), so AST child nodes are wrapped in
+single-element tables:
+
+```yilt
+struct Node
+    kind str       # "int", "bool", "unary", "binary", "error"
+    value int      # for "int" and "bool"
+    op str         # for "unary" and "binary": the operator text
+    left table     # for "binary": {0: Node} (wrapped child)
+    right table    # for "binary": {0: Node}
+    expr table     # for "unary": {0: Node}
+    msg str        # for "error"
+```
+
+Stage 1 will switch to proper recursive enums once the runtime supports them.
 
 ## Bootstrap Strategy
 
-### Phase 1: Cross-compile (current Go compiler → Yilt source)
-- Write the compiler in Yilt syntax
-- Compile with the Go-based `yiltc`
-- Test that output matches `yiltc` output
+### Stage 0 (COMPLETE) — Expression Calculator
+- Lexer + Pratt parser + evaluator for arithmetic/boolean expressions
+- Written in Yilt, compiled by Go `yiltc`
+- 17/17 test cases pass
+- Demonstrates Yilt can express: character classification, tokenisation,
+  recursive-descent parsing, AST traversal, recursion, struct/table usage
 
-### Phase 2: Minimal self-host
-- Get the compiler to compile a trivial Yilt program
-- The output of the self-host compiler should produce a working binary
+### Stage 1 (NEXT) — Yilt Subset Lexer
+- Extend the lexer to handle full Yilt source: keywords, string literals,
+  f-strings, indentation tokens, comments
+- Output a token stream that can be consumed by a parser
+- ~2000 lines of Yilt
 
-### Phase 3: Full self-host
-- The self-host compiler compiles itself
-- Fixpoint: `yiltc compiles selfhost.ylt → selfhost_binary; selfhost_binary compiles selfhost.ylt → same binary`
+### Stage 2 — Yilt Subset Parser
+- Parse the token stream into a full Yilt AST
+- Handle: fn declarations, struct/enum declarations, let bindings, if/but/else,
+  while, for-in, match, expressions, closures
+- ~3000 lines of Yilt
 
-## Current Yilt Capabilities & Limitations
+### Stage 3 — Yilt Subset Type Checker
+- Type inference, scope management, generic monomorphisation
+- ~2000 lines of Yilt
 
-### Available now (can use in self-host):
-- Basic types: int, float, str, bool, nil, table, void
-- Functions: top-level, anonymous, recursion, closures (no capture)
-- Control flow: if/but/else, while, for-in, match/case/default, break, continue
-- Tables: literal, index/field access, assignment
-- String interpolation: f-strings
-- Struct declarations (backed by tables)
-- Constants: const, local const
-- Error propagation: `?` operator
-- Assertions: assert
-- Stdlib: sys module (args, env, platform), print/println
+### Stage 4 — Yilt Subset Code Generator
+- Emit x86_64 machine code for a subset of Yilt
+- Output ELF64 binaries via the existing linker (or a Yilt-written one)
+- ~3000 lines of Yilt
 
-### NOT yet available (need to work around):
-- No arrays (`[1, 2, 3]` syntax) — use tables with int keys
-- No enums, traits, interfaces
-- No range syntax (`0..n`)
-- Closures cannot capture variables (runtime limitation)
-- print() of strings shows nil at runtime (C runtime stub)
-- Table literal with multiple entries can hang (C runtime bug)
-- For-in loop over tables has off-by-one issues
+### Stage 5 — Self-Compilation (Fixpoint)
+- The Stage 4 compiler compiles itself
+- Verify: `yiltc compiles selfhost.ylt → binary1; binary1 compiles selfhost.ylt → binary2; binary1 == binary2`
 
-## Design Decisions for Self-Host
+## Runtime Bugs Fixed During Stage 0
 
-1. **Single-file bootstrap**: Start with everything in one file for simplicity
-2. **Table-based data structures**: Use tables for AST nodes, symbol tables, etc.
-   - AST nodes: `{"kind": "fn_decl", "name": "main", "params": {0: ..., 1: ...}, ...}`
-   - Token: `{"kind": "t_int", "value": 42, "line": 1, "col": 1}`
-3. **String-based identifiers**: All names stored as strings
-4. **Two-pass compilation**: Parse all source, then type-check/codegen
-5. **No GC**: Use bump allocation via the arena API when available
+Writing the self-host compiler exposed four real runtime bugs that hadn't
+been caught by the existing test suite:
 
+1. **String equality (`==` on `str`)** — was using bitwise comparison
+   of tagged values (pointer identity), so two separate allocations of
+   "int" were never equal.  Fixed: `==` and `!=` on strings now call
+   `pure_values_equal` for content-based comparison.
 
+2. **Boolean NOT (`not` on `bool`)** — was using bitwise NOT (`~x`)
+   which corrupts the tag bits of tagged bools.  Fixed: `not` on bools
+   now uses `XOR x, 1` to flip just the payload bit.
 
+3. **Short-circuit AND/OR** — `and` used `b.Not(left)` (bitwise) to
+   check if left was false, which corrupted the tag.  Fixed: branch
+   directly on `left` (truthy = evaluate right, falsy = skip).
+
+4. **Conditional branch (`if`/`while` conditions)** — `genCondJump`
+   used `TEST cond, cond` which checks if the full 64-bit value is
+   non-zero.  But tagged `false` = `0x0200000000000000` is non-zero
+   (the tag byte is 0x02)!  Fixed: `TEST cond, 1` checks only the
+   payload bit, correctly distinguishing true (1) from false (0).
+
+5. **memcmp (`pure_values_equal` string comparison)** — `emitMemcmp`
+   emitted `0xF2 0xA6` (REPNE CMPSB) instead of `0xF3 0xA6` (REPE
+   CMPSB).  REPNE stops at the first MATCHING byte, so "abc"=="abd"
+   returned true because byte 0 ('a') matched.  Fixed: use REPE which
+   stops at the first MISMATCH.
+
+All five bugs are now fixed.  The Go test suite (240/240 tests) still
+passes with no regressions.

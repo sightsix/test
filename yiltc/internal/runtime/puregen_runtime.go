@@ -104,7 +104,14 @@ func (fb *rtFuncBuilder) emitMemcmp(a_reg, b_reg, count x86_64.Reg) {
         a.JZ(skip)
         // Clear DF (forward direction) — should be 0 on entry, but be safe
         a.EmitBytes([]byte{0xFC}) // CLD
-        a.EmitBytes([]byte{0xF2, 0xA6}) // REPZ CMPSB
+        // REPE CMPSB (0xF3 0xA6): repeat while bytes are EQUAL.
+        // Stops when a mismatch is found (ZF=0) or RCX reaches 0.
+        // After: ZF=1 if all bytes matched, ZF=0 if mismatch.
+        //
+        // BUG FIX: previously emitted 0xF2 (REPNE) which repeats while
+        // bytes are NOT equal — it stops at the first matching byte,
+        // making "abc"=="abd" return true because byte 0 ('a') matches.
+        a.EmitBytes([]byte{0xF3, 0xA6}) // REPE CMPSB
         a.Label(skip)
         // After REPZ CMPSB: ZF=1 if all bytes matched, ZF=0 if mismatch
 }

@@ -902,6 +902,25 @@ func (l *lowerer) isStr(e ast.Expr) bool {
         return ok && td.Kind == check.TStr
 }
 
+// isStrExpr reports whether the given expression has type str.
+// Used to decide whether to use content-based equality (pure_values_equal)
+// for == and != operators, since bitwise comparison of two distinct string
+// allocations always returns false even when the content is identical.
+func (l *lowerer) isStrExpr(e ast.Expr) bool {
+        return l.isStr(e)
+}
+
+// isBoolExpr reports whether the given expression has type bool.
+// Used to decide whether `not` should use XOR-with-1 (for bools, to
+// preserve the tag bits) or bitwise NOT (for integers).
+func (l *lowerer) isBoolExpr(e ast.Expr) bool {
+        if l.exprTypes == nil {
+                return false
+        }
+        td, ok := l.exprTypes[e]
+        return ok && td.Kind == check.TBool
+}
+
 func (l *lowerer) stmt(s ast.Stmt) {
         switch s := s.(type) {
         case *ast.ConstStmt:
@@ -1521,6 +1540,25 @@ func (l *lowerer) expr(e ast.Expr) *ir.Value {
                 if e.Op == ast.TPlus && l.isStr(e) {
                         return b.Call("y_str_concat", []*ir.Value{left, right}, ir.VRaw, "strcat")
                 }
+                // String equality: str == str and str != str must use
+                // content-based comparison (pure_values_equal), not bitwise
+                // pointer comparison.  Two separate allocations of "int" have
+                // different StrHeader pointers, so bitwise == would always
+                // return false for them.  y_val_eq is bitwise; we need the
+                // content-aware pure_values_equal instead.
+                //
+                // Note: isStr(e) checks the type of e itself, which for ==
+                // is bool (not str).  We need to check the OPERAND types.
+                if e.Op == ast.TEq || e.Op == ast.TNeq {
+                        if l.isStrExpr(e.Left) || l.isStrExpr(e.Right) {
+                                eqResult := b.Call("pure_values_equal", []*ir.Value{left, right}, ir.VRaw, "streq")
+                                if e.Op == ast.TEq {
+                                        return eqResult
+                                }
+                                // For !=, invert the result: 1 -> 0, 0 -> 1.
+                                return b.Xor(eqResult, b.ConstInt(1, "one"), "strneq")
+                        }
+                }
                 // For float-typed expressions, delegate to runtime float functions.
                 if l.isFloat(e) {
                         switch e.Op {
@@ -1585,6 +1623,17 @@ func (l *lowerer) expr(e ast.Expr) *ir.Value {
                 case ast.TMinus:
                         return b.Neg(operand, "neg")
                 case ast.TNot:
+                        // Bool NOT: must XOR the payload bit (1), NOT bitwise-NOT
+                        // the whole tagged value.  Yilt bools are tagged:
+                        //   true  = (TAG_BOOL << 56) | 1
+                        //   false = (TAG_BOOL << 56) | 0
+                        // Bitwise NOT would corrupt the tag bits and produce
+                        // garbage.  XOR-with-1 flips just the payload bit,
+                        // turning true into false and vice versa.
+                        if l.isBoolExpr(e.Operand) {
+                                return b.Xor(operand, b.ConstInt(1, "one"), "boolnot")
+                        }
+                        // For non-bool (e.g. int), fall back to bitwise NOT.
                         return b.Not(operand, "not")
                 case ast.TTilde:
                         return b.BitNot(operand, "bitnot")
@@ -2006,9 +2055,16 @@ func (l *lowerer) shortCircuitAnd(left *ir.Value, right ast.Expr) *ir.Value {
         result := b.Or(left, zero, "and.result")
         b.CurBlock().MarkNoFold()
 
-        // Check if left is false - if so, skip right evaluation
-        notLeft := b.Not(left, "not.left")
-        b.Branch(notLeft, mergeBlock, rightBlock, nil, nil)
+        // Short-circuit: if left is FALSE (zero payload), skip right and
+        // return left (which is false).  If left is TRUE (non-zero), evaluate
+        // right.
+        //
+        // Previously this used b.Not(left) which is a BITWISE NOT — broken
+        // for tagged bools because it corrupts the tag bits.  Instead, we
+        // branch directly on left: Branch takes the "then" branch when the
+        // condition is non-zero (truthy).  For `and`, we want to go to
+        // rightBlock when left is TRUE, and mergeBlock when left is FALSE.
+        b.Branch(left, rightBlock, mergeBlock, nil, nil)
 
         // Evaluate right in the right branch and overwrite the result slot.
         b.SetBlock(rightBlock)

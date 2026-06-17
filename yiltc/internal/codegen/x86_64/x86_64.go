@@ -1580,7 +1580,17 @@ func (cg *CodeGen) genCondJump(ins *IRInstr) {
         // Src[2] is the false label (fall-through or explicit)
         cond := cg.getOperandGPR(&ins.Src[0], 64)
 
-        a.TestRR(cond, cond)
+        // Yilt bools are tagged: true = (TAG_BOOL << 56) | 1, false = (TAG_BOOL << 56) | 0.
+        // Both are non-zero in the full 64-bit representation (the tag byte is 0x02),
+        // so TEST cond, cond would always be "truthy".  We must test the PAYLOAD bit
+        // (bit 0) instead.  TEST cond, 1 checks if bit 0 is set, which correctly
+        // distinguishes true (1) from false (0).
+        //
+        // For raw integer conditions (e.g. from `if x` where x is int), bit 0 also
+        // correctly reflects truthiness for all non-zero integers except even ones.
+        // The Yilt checker requires `if` conditions to be bool, so in practice the
+        // condition is always a tagged bool and this is correct.
+        a.TestRI(cond, 1)
         a.JNE(ins.Src[1].Str)
 
         // If there's a false label, jump there too (after the true test fails)

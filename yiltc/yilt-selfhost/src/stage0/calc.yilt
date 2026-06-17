@@ -1,0 +1,542 @@
+// ===========================================================================
+// Yilt Self-Host Compiler — Stage 0: Expression Calculator
+// ===========================================================================
+//
+// This is the first concrete step of the yilt-selfhost bootstrap.  It is a
+// complete lexer + Pratt parser + tree-walking evaluator for arithmetic
+// expressions, written entirely in Yilt and compiled by the Go-based yiltc.
+//
+// Why a calculator?
+//   - Demonstrates that Yilt can express real compiler infrastructure
+//     (character classification, tokenisation, recursive-descent parsing,
+//     AST traversal, recursion).
+//   - Small enough to fit in one file and verify end-to-end in one session.
+//   - The lexer/parser patterns here generalise directly to a full Yilt
+//     lexer/parser in Stage 1.
+//
+// Source language (a tiny subset of Yilt expressions):
+//   expr     := or_expr
+//   or_expr  := and_expr ( "or" and_expr )*
+//   and_expr := eq_expr ( "and" eq_expr )*
+//   eq_expr  := cmp_expr ( ("==" | "!=") cmp_expr )*
+//   cmp_expr := add_expr ( ("<" | "<=" | ">" | ">=") add_expr )*
+//   add_expr := mul_expr ( ("+" | "-") mul_expr )*
+//   mul_expr := unary ( ("*" | "/" | "%") unary )*
+//   unary    := ("-" | "not") unary | primary
+//   primary  := INT | true | false | "(" expr ")"
+//
+// Example input:  "2 + 3 * (4 - 1)"
+// Example output: "11"
+//
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Section 1: Token kinds (integer constants)
+// ---------------------------------------------------------------------------
+
+const T_EOF = 0
+const T_INT = 1
+const T_IDENT = 2
+const T_PLUS = 3
+const T_MINUS = 4
+const T_STAR = 5
+const T_SLASH = 6
+const T_PERCENT = 7
+const T_LPAREN = 8
+const T_RPAREN = 9
+const T_EQ = 10
+const T_NEQ = 11
+const T_LT = 12
+const T_LE = 13
+const T_GT = 14
+const T_GE = 15
+const T_AND = 16      // keyword 'and'
+const T_OR = 17       // keyword 'or'
+const T_NOT = 18      // keyword 'not'
+const T_TRUE = 19
+const T_FALSE = 20
+
+// ---------------------------------------------------------------------------
+// Section 2: Data types (structs)
+// ---------------------------------------------------------------------------
+
+// A single token produced by the lexer.
+struct Token
+    kind int       // one of the T_* constants
+    value int      // integer value for T_INT
+    text str       // source text of the token (for identifiers, operators)
+    line int       // 1-indexed source line
+    col int        // 1-indexed source column
+
+// Lexer state.  Carries the source as both a string (for substr extraction)
+// and a byte table (for character classification), plus a current position.
+struct Lexer
+    mut src str
+    mut bytes table
+    mut pos int
+    mut line int
+    mut col int
+
+// AST node types.  We use a single Node struct with a "kind" field that
+// tells us which other fields are meaningful.  This is the classic
+// "tagged union via struct" pattern from C — Yilt enums with payloads
+// would be more elegant but require more runtime support (we'll switch
+// to them in Stage 1 once the runtime is more complete).
+struct Node
+    kind str       // "int", "bool", "unary", "binary", "error"
+    value int      // for "int" and "bool" (1=true, 0=false)
+    op str         // for "unary" and "binary"
+    left table     // for "binary": left child (Node stored in a table)
+    right table    // for "binary": right child
+    expr table     // for "unary": operand
+    msg str        // for "error": message
+
+// Parser state.
+struct Parser
+    mut tokens table  // integer-keyed table of Token structs
+    mut pos int
+
+// ---------------------------------------------------------------------------
+// Section 3: Lexer
+// ---------------------------------------------------------------------------
+
+fn lex_new(source str) Lexer
+    let mut l = Lexer{src: source, bytes: source.bytes(), pos: 0, line: 1, col: 1}
+    return l
+
+// Returns the byte at the current position, or -1 at EOF.
+fn lex_peek(l Lexer) int
+    let b = l.bytes
+    let pos = l.pos
+    if pos >= b.len()
+        return -1
+    return b[pos]
+
+// Advance one byte, updating line/col counters.
+fn lex_advance(l Lexer)
+    let b = l.bytes
+    let pos = l.pos
+    if pos >= b.len()
+        return
+    let ch = b[pos]
+    l.pos = pos + 1
+    if ch == 10
+        l.line = l.line + 1
+        l.col = 1
+    else
+        l.col = l.col + 1
+
+// Skip whitespace characters.
+fn lex_skip_ws(l Lexer)
+    while true
+        let ch = lex_peek(l)
+        if ch == -1
+            return
+        // space=32, tab=9, newline=10, CR=13
+        if ch != 32 and ch != 9 and ch != 10 and ch != 13
+            return
+        lex_advance(l)
+
+// Character classification helpers.  Yilt doesn't expose char literals,
+// so we use byte values directly (ASCII codes).
+//   '0' = 48, '9' = 57
+//   'a' = 97, 'z' = 122
+//   'A' = 65, 'Z' = 90
+//   '_' = 95
+fn is_digit(b int) bool
+    return b >= 48 and b <= 57
+
+fn is_alpha(b int) bool
+    return (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
+
+fn is_alnum(b int) bool
+    return is_alpha(b) or is_digit(b)
+
+// Read an integer literal: digits 0-9.  Returns a T_INT token.
+fn lex_number(l Lexer) Token
+    let start_line = l.line
+    let start_col = l.col
+    let start_pos = l.pos
+    let mut value = 0
+    while true
+        let ch = lex_peek(l)
+        if ch == -1 or not is_digit(ch)
+            break
+        value = value * 10 + (ch - 48)
+        lex_advance(l)
+    let end_pos = l.pos
+    let text = l.src.substr(start_pos, end_pos)
+    return Token{kind: T_INT, value: value, text: text, line: start_line, col: start_col}
+
+// Read an identifier or keyword: [a-zA-Z_][a-zA-Z0-9_]*.
+fn lex_ident(l Lexer) Token
+    let start_line = l.line
+    let start_col = l.col
+    let start_pos = l.pos
+    while true
+        let ch = lex_peek(l)
+        if ch == -1 or not is_alnum(ch)
+            break
+        lex_advance(l)
+    let end_pos = l.pos
+    let text = l.src.substr(start_pos, end_pos)
+    let kind = ident_kind(text)
+    return Token{kind: kind, value: 0, text: text, line: start_line, col: start_col}
+
+// Map an identifier text to its token kind.  Returns T_IDENT for non-keywords.
+fn ident_kind(text str) int
+    if text == "and"
+        return T_AND
+    if text == "or"
+        return T_OR
+    if text == "not"
+        return T_NOT
+    if text == "true"
+        return T_TRUE
+    if text == "false"
+        return T_FALSE
+    return T_IDENT
+
+// Tokenize the entire source.  Returns a table of Token structs (integer-keyed).
+fn lex_all(source str) table
+    let mut l = lex_new(source)
+    let mut tokens = {}
+    let mut idx = 0
+    let mut done = false
+    while not done
+        lex_skip_ws(l)
+        let ch = lex_peek(l)
+        if ch == -1
+            tokens[idx] = Token{kind: T_EOF, value: 0, text: "<eof>", line: l.line, col: l.col}
+            done = true
+        else
+            let tok = lex_one(l)
+            tokens[idx] = tok
+            idx = idx + 1
+    return tokens
+
+// Read one token, assuming whitespace has already been skipped.
+fn lex_one(l Lexer) Token
+    let ch = lex_peek(l)
+    let line = l.line
+    let col = l.col
+    if is_digit(ch)
+        return lex_number(l)
+    if is_alpha(ch)
+        return lex_ident(l)
+    // Single and double char operators.
+    lex_advance(l)
+    if ch == 43          // '+'
+        return Token{kind: T_PLUS, value: 0, text: "+", line: line, col: col}
+    if ch == 45          // '-'
+        return Token{kind: T_MINUS, value: 0, text: "-", line: line, col: col}
+    if ch == 42          // '*'
+        return Token{kind: T_STAR, value: 0, text: "*", line: line, col: col}
+    if ch == 47          // '/'
+        return Token{kind: T_SLASH, value: 0, text: "/", line: line, col: col}
+    if ch == 37          // '%'
+        return Token{kind: T_PERCENT, value: 0, text: "%", line: line, col: col}
+    if ch == 40          // '('
+        return Token{kind: T_LPAREN, value: 0, text: "(", line: line, col: col}
+    if ch == 41          // ')'
+        return Token{kind: T_RPAREN, value: 0, text: ")", line: line, col: col}
+    if ch == 60          // '<'
+        if lex_peek(l) == 61  // '='
+            lex_advance(l)
+            return Token{kind: T_LE, value: 0, text: "<=", line: line, col: col}
+        return Token{kind: T_LT, value: 0, text: "<", line: line, col: col}
+    if ch == 62          // '>'
+        if lex_peek(l) == 61  // '='
+            lex_advance(l)
+            return Token{kind: T_GE, value: 0, text: ">=", line: line, col: col}
+        return Token{kind: T_GT, value: 0, text: ">", line: line, col: col}
+    if ch == 61          // '='
+        if lex_peek(l) == 61  // '=='
+            lex_advance(l)
+            return Token{kind: T_EQ, value: 0, text: "==", line: line, col: col}
+        return Token{kind: -1, value: 0, text: "=", line: line, col: col}
+    if ch == 33          // '!'
+        if lex_peek(l) == 61  // '!='
+            lex_advance(l)
+            return Token{kind: T_NEQ, value: 0, text: "!=", line: line, col: col}
+        return Token{kind: -1, value: 0, text: "!", line: line, col: col}
+    // Unknown character — emit an error token.
+    return Token{kind: -2, value: 0, text: "?", line: line, col: col}
+
+// ---------------------------------------------------------------------------
+// Section 4: Pratt Parser
+// ---------------------------------------------------------------------------
+
+fn parser_new(tokens table) Parser
+    let mut p = Parser{tokens: tokens, pos: 0}
+    return p
+
+fn p_peek(p Parser) Token
+    let tokens = p.tokens
+    return tokens[p.pos]
+
+fn p_advance(p Parser) Token
+    let tokens = p.tokens
+    let tok = tokens[p.pos]
+    p.pos = p.pos + 1
+    return tok
+
+// Parse a full expression.  Entry point.
+fn parse_expr(p Parser) Node
+    return parse_or(p)
+
+// or_expr := and_expr ( "or" and_expr )*
+fn parse_or(p Parser) Node
+    let mut left = parse_and(p)
+    while p_peek(p).kind == T_OR
+        p_advance(p)
+        let right = parse_and(p)
+        left = make_binary("or", left, right)
+    return left
+
+// and_expr := eq_expr ( "and" eq_expr )*
+fn parse_and(p Parser) Node
+    let mut left = parse_eq(p)
+    while p_peek(p).kind == T_AND
+        p_advance(p)
+        let right = parse_eq(p)
+        left = make_binary("and", left, right)
+    return left
+
+// eq_expr := cmp_expr ( ("==" | "!=") cmp_expr )*
+fn parse_eq(p Parser) Node
+    let mut left = parse_cmp(p)
+    while true
+        let k = p_peek(p).kind
+        if k == T_EQ or k == T_NEQ
+            let op_tok = p_advance(p)
+            let op = op_tok.text
+            let right = parse_cmp(p)
+            left = make_binary(op, left, right)
+        else
+            break
+    return left
+
+// cmp_expr := add_expr ( ("<" | "<=" | ">" | ">=") add_expr )*
+fn parse_cmp(p Parser) Node
+    let mut left = parse_add(p)
+    while true
+        let k = p_peek(p).kind
+        if k == T_LT or k == T_LE or k == T_GT or k == T_GE
+            let op_tok = p_advance(p)
+            let op = op_tok.text
+            let right = parse_add(p)
+            left = make_binary(op, left, right)
+        else
+            break
+    return left
+
+// add_expr := mul_expr ( ("+" | "-") mul_expr )*
+fn parse_add(p Parser) Node
+    let mut left = parse_mul(p)
+    while true
+        let k = p_peek(p).kind
+        if k == T_PLUS or k == T_MINUS
+            let op_tok = p_advance(p)
+            let op = op_tok.text
+            let right = parse_mul(p)
+            left = make_binary(op, left, right)
+        else
+            break
+    return left
+
+// mul_expr := unary ( ("*" | "/" | "%") unary )*
+fn parse_mul(p Parser) Node
+    let mut left = parse_unary(p)
+    while true
+        let k = p_peek(p).kind
+        if k == T_STAR or k == T_SLASH or k == T_PERCENT
+            let op_tok = p_advance(p)
+            let op = op_tok.text
+            let right = parse_unary(p)
+            left = make_binary(op, left, right)
+        else
+            break
+    return left
+
+// unary := ("-" | "not") unary | primary
+fn parse_unary(p Parser) Node
+    let k = p_peek(p).kind
+    if k == T_MINUS
+        p_advance(p)
+        let e = parse_unary(p)
+        return make_unary("-", e)
+    if k == T_NOT
+        p_advance(p)
+        let e = parse_unary(p)
+        return make_unary("not", e)
+    return parse_primary(p)
+
+// primary := INT | true | false | "(" expr ")"
+fn parse_primary(p Parser) Node
+    let tok = p_peek(p)
+    let k = tok.kind
+    if k == T_INT
+        p_advance(p)
+        return Node{kind: "int", value: tok.value, op: "", left: {}, right: {}, expr: {}, msg: ""}
+    if k == T_TRUE
+        p_advance(p)
+        return Node{kind: "bool", value: 1, op: "", left: {}, right: {}, expr: {}, msg: ""}
+    if k == T_FALSE
+        p_advance(p)
+        return Node{kind: "bool", value: 0, op: "", left: {}, right: {}, expr: {}, msg: ""}
+    if k == T_LPAREN
+        p_advance(p)
+        let e = parse_expr(p)
+        if p_peek(p).kind == T_RPAREN
+            p_advance(p)
+        return e
+    return Node{kind: "error", value: 0, op: "", left: {}, right: {}, expr: {}, msg: "unexpected token"}
+
+// AST constructors.  We wrap child Nodes in single-element tables because
+// Yilt struct fields can't directly hold another struct of the same type
+// (recursive structs aren't supported).  The table indirection breaks the
+// cycle.  Stage 1 will use proper recursive enums once the runtime supports
+// them.
+fn make_binary(op str, left Node, right Node) Node
+    let mut lt = {}
+    lt[0] = left
+    let mut rt = {}
+    rt[0] = right
+    return Node{kind: "binary", value: 0, op: op, left: lt, right: rt, expr: {}, msg: ""}
+
+fn make_unary(op str, e Node) Node
+    let mut et = {}
+    et[0] = e
+    return Node{kind: "unary", value: 0, op: op, left: {}, right: {}, expr: et, msg: ""}
+
+// ---------------------------------------------------------------------------
+// Section 5: Tree-Walking Evaluator
+// ---------------------------------------------------------------------------
+
+fn eval(node Node) int
+    let kind = node.kind
+    if kind == "int"
+        return node.value
+    if kind == "bool"
+        return node.value
+    if kind == "unary"
+        let et = node.expr
+        let v = eval(et[0])
+        let op = node.op
+        if op == "-"
+            return -v
+        if op == "not"
+            if v == 0
+                return 1
+            return 0
+        return 0
+    if kind == "binary"
+        let lt = node.left
+        let rt = node.right
+        let l = eval(lt[0])
+        let r = eval(rt[0])
+        let op = node.op
+        if op == "+"
+            return l + r
+        if op == "-"
+            return l - r
+        if op == "*"
+            return l * r
+        if op == "/"
+            if r == 0
+                return 0
+            return l / r
+        if op == "%"
+            if r == 0
+                return 0
+            return l % r
+        if op == "=="
+            if l == r
+                return 1
+            return 0
+        if op == "!="
+            if l != r
+                return 1
+            return 0
+        if op == "<"
+            if l < r
+                return 1
+            return 0
+        if op == "<="
+            if l <= r
+                return 1
+            return 0
+        if op == ">"
+            if l > r
+                return 1
+            return 0
+        if op == ">="
+            if l >= r
+                return 1
+            return 0
+        if op == "and"
+            if l != 0 and r != 0
+                return 1
+            return 0
+        if op == "or"
+            if l != 0 or r != 0
+                return 1
+            return 0
+        return 0
+    if kind == "error"
+        print("eval error: ")
+        print(node.msg)
+        print(" near '")
+        print(node.msg)
+        print("'")
+        return 0
+    print("eval: unknown node kind")
+    return 0
+
+// ---------------------------------------------------------------------------
+// Section 6: Main Entry Point
+// ---------------------------------------------------------------------------
+
+fn run_one(src str) int
+    let tokens = lex_all(src)
+    let mut p = parser_new(tokens)
+    let ast = parse_expr(p)
+    return eval(ast)
+
+fn main() int
+    print("=== Yilt Self-Host Stage 0: Expression Calculator ===")
+    print("")
+    
+    // Test cases — a progression of complexity.
+    let mut tests = {}
+    tests[0] = "1 + 2"
+    tests[1] = "2 + 3 * 4"
+    tests[2] = "(2 + 3) * 4"
+    tests[3] = "2 + 3 * (4 - 1)"
+    tests[4] = "10 - 2 - 3"
+    tests[5] = "100 / 7"
+    tests[6] = "100 % 7"
+    tests[7] = "2 < 3"
+    tests[8] = "3 < 2"
+    tests[9] = "1 == 1"
+    tests[10] = "1 != 2"
+    tests[11] = "true and false"
+    tests[12] = "true or false"
+    tests[13] = "not true"
+    tests[14] = "-5 + 10"
+    tests[15] = "2 + 3 == 5"
+    tests[16] = "(1 + 2) * (3 + 4) - 10"
+    
+    let mut i = 0
+    while i < tests.len()
+        let src = tests[i]
+        let result = run_one(src)
+        print(src)
+        print(" => ")
+        print(result)
+        i = i + 1
+    
+    print("")
+    print("=== Stage 0 complete ===")
+    return 0
