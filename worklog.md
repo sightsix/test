@@ -791,3 +791,30 @@ Stage Summary:
 - 78/79 tests pass (98.7%)
 - True fixpoint verified
 - 156 functions in the self-host compiler
+
+---
+Task ID: 39-FULL-RESTORATION-COMPLETE
+Agent: main (Super Z)
+Task: Add parse_struct_lit to fix the last failing test.
+
+Work Log:
+- Root cause of struct_comprehensive failure: parse_struct_lit function was
+  missing from the parser (lost during truncation). Struct literals like
+  Point{x: 5, y: 10} were not being parsed — the T_LBRACE in parse_postfix
+  was not handled, so nested struct literals failed.
+- Added parse_struct_lit function and T_LBRACE handling in parse_postfix:
+  - When T_LBRACE follows an identifier, calls parse_struct_lit
+  - parse_struct_lit parses field_name: value pairs separated by commas
+  - Properly handles nested struct literals (recursive parse_expr calls)
+  - Added T_LBRACE to the loop continuation condition
+
+- FINAL TEST RESULTS: 79/79 pass (100%) ✅
+  - basic: 16/16, functions: 18/18, types: 11/11, advanced: 20/20
+  - stdlib: 12/12, multi_file: 2/2
+  - True fixpoint: gen3 == gen4 ✅
+
+Stage Summary:
+- ALL 79 tests pass (100%) across ALL test directories
+- True multi-generation fixpoint verified
+- 157 functions in the self-host compiler
+- The Yilt self-hosting bootstrap is FULLY RESTORED after the truncation incident

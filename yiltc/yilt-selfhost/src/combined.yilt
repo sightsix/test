@@ -2014,9 +2014,40 @@ fn parse_postfix(p Parser) Node
             ea[0] = e
             let mut n = Node{kind: "error_prop", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
             e = n
-        if k != T_PERIOD and k != T_LBRACK and k != T_LPAREN and k != T_QUESTION
+        if k == T_LBRACE
+            if e.kind == "ident"
+                e = parse_struct_lit(p, e.sval)
+            if e.kind != "ident"
+                done = true
+        if k != T_PERIOD and k != T_LBRACK and k != T_LPAREN and k != T_QUESTION and k != T_LBRACE
             done = true
     return e
+
+fn parse_struct_lit(p Parser, type_name str) Node
+    p_expect(p, T_LBRACE, "'{'")
+    let mut fields = {}
+    let mut idx = 0
+    let mut done = false
+    while not done
+        if p_at(p, T_RBRACE) or p_at(p, T_EOF)
+            done = true
+        if not done
+            if idx > 0
+                p_expect(p, T_COMMA, "','")
+            if p_at(p, T_RBRACE)
+                done = true
+            if not done
+                let name_tok = p_expect(p, T_IDENT, "field name")
+                p_expect(p, T_COLON, "':'")
+                let val = parse_expr(p)
+                let mut va = {}
+                va[0] = val
+                let mut f = Node{kind: "field_init", sval: name_tok.value, ival: 0, bval: false, a: va, b: {}, c: {}, list: {}, extra: ""}
+                fields[idx] = f
+                idx = idx + 1
+    p_expect(p, T_RBRACE, "'}'")
+    let mut n = Node{kind: "struct_lit", sval: type_name, ival: 0, bval: false, a: {}, b: {}, c: {}, list: fields, extra: ""}
+    return n
 
 fn parse_args(p Parser) table
     let mut args = {}
