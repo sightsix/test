@@ -709,11 +709,47 @@ fn parse_or(p Parser) Node
     return left
 
 fn parse_and(p Parser) Node
-    let mut left = parse_eq(p)
+    let mut left = parse_bitor(p)
     while p_at(p, T_AND)
         p_advance(p)
-        let right = parse_eq(p)
+        let right = parse_bitor(p)
         left = n_binary("and", left, right)
+    return left
+
+// parse_bitor: bitwise OR (|) — lower precedence than logical and, higher than xor
+fn parse_bitor(p Parser) Node
+    let mut left = parse_bitxor(p)
+    let mut done = false
+    while not done
+        if p_at(p, T_PIPE)
+            p_advance(p)
+            left = n_binary("|", left, parse_bitxor(p))
+        if not p_at(p, T_PIPE)
+            done = true
+    return left
+
+// parse_bitxor: bitwise XOR (^)
+fn parse_bitxor(p Parser) Node
+    let mut left = parse_bitand(p)
+    let mut done = false
+    while not done
+        if p_at(p, T_CARET)
+            p_advance(p)
+            left = n_binary("^", left, parse_bitand(p))
+        if not p_at(p, T_CARET)
+            done = true
+    return left
+
+// parse_bitand: bitwise AND (&)
+fn parse_bitand(p Parser) Node
+    let mut left = parse_eq(p)
+    let mut done = false
+    while not done
+        if p_at(p, T_AMP)
+            p_advance(p)
+            left = n_binary("&", left, parse_eq(p))
+        if not p_at(p, T_AMP)
+            done = true
     return left
 
 fn parse_eq(p Parser) Node
@@ -734,23 +770,39 @@ fn parse_eq(p Parser) Node
     return left
 
 fn parse_cmp(p Parser) Node
-    let mut left = parse_add(p)
+    let mut left = parse_shift(p)
     let mut done = false
     while not done
         let k = p_peek_kind(p)
         if k == T_LT
             p_advance(p)
-            left = n_binary("<", left, parse_add(p))
+            left = n_binary("<", left, parse_shift(p))
         if k == T_LE
             p_advance(p)
-            left = n_binary("<=", left, parse_add(p))
+            left = n_binary("<=", left, parse_shift(p))
         if k == T_GT
             p_advance(p)
-            left = n_binary(">", left, parse_add(p))
+            left = n_binary(">", left, parse_shift(p))
         if k == T_GE
             p_advance(p)
-            left = n_binary(">=", left, parse_add(p))
+            left = n_binary(">=", left, parse_shift(p))
         if k != T_LT and k != T_LE and k != T_GT and k != T_GE
+            done = true
+    return left
+
+// parse_shift: left shift (<<) and right shift (>>)
+fn parse_shift(p Parser) Node
+    let mut left = parse_add(p)
+    let mut done = false
+    while not done
+        let k = p_peek_kind(p)
+        if k == T_LSHIFT
+            p_advance(p)
+            left = n_binary("<<", left, parse_add(p))
+        if k == T_RSHIFT
+            p_advance(p)
+            left = n_binary(">>", left, parse_add(p))
+        if k != T_LSHIFT and k != T_RSHIFT
             done = true
     return left
 

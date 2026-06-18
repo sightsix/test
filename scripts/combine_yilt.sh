@@ -10,10 +10,18 @@ set -e
 SRC=/home/z/my-project/yiltc/yilt-selfhost/src
 OUT="$SRC/combined.yilt"
 
-# stage1/lexer.yilt: drop the "Section 14: Main entry point" header + main() at line 1154+
+# stage1/lexer.yilt: drop everything from "Section 14: Main entry point" onward
 # stage2/parser.yilt: drop lines 1-111 (T_* constants + Token struct: duplicates of stage1),
-#                    then drop the "Section 10: Main entry point" header + main() (lines 1115+)
+#                     then drop everything from "Section 10: Main entry point" onward
 # stage5/codegen.yilt: keep as-is (its main is the real entry point)
+
+# Find the line number where "Main entry point" section starts in stage1
+STAGE1_MAIN=$(grep -n "Main entry point" "$SRC/stage1/lexer.yilt" | head -1 | cut -d: -f1)
+STAGE1_END=$((STAGE1_MAIN - 2))  # -2 to skip the section header comment
+
+# Find the line number where "Main entry point" section starts in stage2
+STAGE2_MAIN=$(grep -n "Main entry point" "$SRC/stage2/parser.yilt" | head -1 | cut -d: -f1)
+STAGE2_END=$((STAGE2_MAIN - 2))
 
 {
   echo "// ==========================================================================="
@@ -28,13 +36,13 @@ OUT="$SRC/combined.yilt"
   echo "// ==========================================================================="
   echo "// SECTION 1: Lexer  (originally stage1/lexer.yilt, main() stripped)"
   echo "// ==========================================================================="
-  head -n 1153 "$SRC/stage1/lexer.yilt"
+  head -n "$STAGE1_END" "$SRC/stage1/lexer.yilt"
   echo ""
   echo "// ==========================================================================="
   echo "// SECTION 2: Parser  (originally stage2/parser.yilt, T_*/Token/main stripped)"
   echo "// ==========================================================================="
   echo "// --- skipped stage2 lines 1-111 (T_* constants + Token struct: duplicates of stage1)"
-  tail -n +112 "$SRC/stage2/parser.yilt" | head -n 1002
+  tail -n +112 "$SRC/stage2/parser.yilt" | head -n $((STAGE2_END - 111))
   echo ""
   echo "// ==========================================================================="
   echo "// SECTION 3: Code Generator  (originally stage5/codegen.yilt)"

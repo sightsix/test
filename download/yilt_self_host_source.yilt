@@ -1768,11 +1768,47 @@ fn parse_or(p Parser) Node
     return left
 
 fn parse_and(p Parser) Node
-    let mut left = parse_eq(p)
+    let mut left = parse_bitor(p)
     while p_at(p, T_AND)
         p_advance(p)
-        let right = parse_eq(p)
+        let right = parse_bitor(p)
         left = n_binary("and", left, right)
+    return left
+
+// parse_bitor: bitwise OR (|) — lower precedence than logical and, higher than xor
+fn parse_bitor(p Parser) Node
+    let mut left = parse_bitxor(p)
+    let mut done = false
+    while not done
+        if p_at(p, T_PIPE)
+            p_advance(p)
+            left = n_binary("|", left, parse_bitxor(p))
+        if not p_at(p, T_PIPE)
+            done = true
+    return left
+
+// parse_bitxor: bitwise XOR (^)
+fn parse_bitxor(p Parser) Node
+    let mut left = parse_bitand(p)
+    let mut done = false
+    while not done
+        if p_at(p, T_CARET)
+            p_advance(p)
+            left = n_binary("^", left, parse_bitand(p))
+        if not p_at(p, T_CARET)
+            done = true
+    return left
+
+// parse_bitand: bitwise AND (&)
+fn parse_bitand(p Parser) Node
+    let mut left = parse_eq(p)
+    let mut done = false
+    while not done
+        if p_at(p, T_AMP)
+            p_advance(p)
+            left = n_binary("&", left, parse_eq(p))
+        if not p_at(p, T_AMP)
+            done = true
     return left
 
 fn parse_eq(p Parser) Node
@@ -1793,23 +1829,39 @@ fn parse_eq(p Parser) Node
     return left
 
 fn parse_cmp(p Parser) Node
-    let mut left = parse_add(p)
+    let mut left = parse_shift(p)
     let mut done = false
     while not done
         let k = p_peek_kind(p)
         if k == T_LT
             p_advance(p)
-            left = n_binary("<", left, parse_add(p))
+            left = n_binary("<", left, parse_shift(p))
         if k == T_LE
             p_advance(p)
-            left = n_binary("<=", left, parse_add(p))
+            left = n_binary("<=", left, parse_shift(p))
         if k == T_GT
             p_advance(p)
-            left = n_binary(">", left, parse_add(p))
+            left = n_binary(">", left, parse_shift(p))
         if k == T_GE
             p_advance(p)
-            left = n_binary(">=", left, parse_add(p))
+            left = n_binary(">=", left, parse_shift(p))
         if k != T_LT and k != T_LE and k != T_GT and k != T_GE
+            done = true
+    return left
+
+// parse_shift: left shift (<<) and right shift (>>)
+fn parse_shift(p Parser) Node
+    let mut left = parse_add(p)
+    let mut done = false
+    while not done
+        let k = p_peek_kind(p)
+        if k == T_LSHIFT
+            p_advance(p)
+            left = n_binary("<<", left, parse_add(p))
+        if k == T_RSHIFT
+            p_advance(p)
+            left = n_binary(">>", left, parse_add(p))
+        if k != T_LSHIFT and k != T_RSHIFT
             done = true
     return left
 
@@ -2170,6 +2222,39 @@ fn print_expr(e Node)
         print(e.sval)
         print(" ")
         let oa = e.a
+        print_expr(oa[0])
+        print(")")
+        return
+    if kind == "call"
+        let fa = e.a
+        print_expr(fa[0])
+        print("(")
+        let args = e.list
+        let mut i = 0
+        while i < args.len()
+            if i > 0
+                print(", ")
+            print_expr(args[i])
+            i = i + 1
+        print(")")
+        return
+    if kind == "member"
+        let oa = e.a
+        print_expr(oa[0])
+        print(".")
+        print(e.sval)
+        return
+    if kind == "index"
+        let oa = e.a
+        print_expr(oa[0])
+        print("[")
+        let ib = e.b
+        print_expr(ib[0])
+        print("]")
+        return
+    print("?")
+    print(kind)
+
 
 // ===========================================================================
 // SECTION 3: Code Generator  (originally stage5/codegen.yilt)
@@ -2209,9 +2294,18 @@ struct Ctx
     mut call_fixups table
     mut call_fixup_count int
     mut is_main bool
+    // Loop context for break/continue.
+    // break_targets[n] = code position to jump to when `break` is hit at loop depth n
+    // continue_targets[n] = code position to jump to when `continue` is hit at loop depth n
+    // break_fixups/break_fixup_count = collected forward jump positions to patch at loop end
+    mut loop_depth int
+    mut break_targets table
+    mut continue_targets table
+    mut break_fixups table
+    mut break_fixup_count int
 
 fn ctx_new() Ctx
-    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0, fixup_count: 0, fn_table: {}, fn_count: 0, call_fixups: {}, call_fixup_count: 0, is_main: false}
+    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0, fixup_count: 0, fn_table: {}, fn_count: 0, call_fixups: {}, call_fixup_count: 0, is_main: false, loop_depth: 0, break_targets: {}, continue_targets: {}, break_fixups: {}, break_fixup_count: 0}
     return ctx
 
 // ---------------------------------------------------------------------------
@@ -2569,6 +2663,12 @@ fn cg_expr(ctx Ctx, e Node)
     if e.kind == "string_lit"
         emit_lea_rip(ctx, RAX, 0)
         return
+    if e.kind == "bool_true"
+        emit_mov_r64_imm64(ctx, RAX, 1)
+        return
+    if e.kind == "bool_false"
+        emit_mov_r64_imm64(ctx, RAX, 0)
+        return
     if e.kind == "ident"
         let offset = cg_get_var_offset(ctx, e.sval)
         emit_mov_r64_mem(ctx, RAX, RBP, offset)
@@ -2588,11 +2688,102 @@ fn cg_binary(ctx Ctx, e Node)
     let la = e.a
     let rb = e.b
     let op = e.sval
+
+    // Short-circuit logical operators: and / or
+    // These must NOT evaluate both sides eagerly.
+    if op == "and"
+        // left → RAX; if RAX==0, skip right; result = left & right (0 or right)
+        cg_expr(ctx, la[0])
+        // TEST RAX, RAX; JZ false_label
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x85)
+        code_byte(ctx, 0xC0)  // TEST RAX, RAX
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0x84)  // JZ rel32
+        let jz_pos = ctx.code_len
+        code_u32(ctx, 0)  // placeholder
+        // Evaluate right → RAX
+        cg_expr(ctx, rb[0])
+        // TEST RAX, RAX; set RAX = 0 or 1
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x85)
+        code_byte(ctx, 0xC0)  // TEST RAX, RAX
+        // SETNE AL (set RAX = 1 if RAX != 0, else 0)
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0x95)
+        code_byte(ctx, 0xC0)  // SETNE AL
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0xB6)
+        code_byte(ctx, 0xC0)  // MOVZX RAX, AL
+        // JMP end
+        code_byte(ctx, 0xE9)
+        let jmp_pos = ctx.code_len
+        code_u32(ctx, 0)
+        // false_label: RAX = 0
+        let false_pos = ctx.code_len
+        let jz_disp = false_pos - (jz_pos + 4)
+        ctx.code_data[jz_pos] = ((jz_disp % 256) + 256) % 256
+        ctx.code_data[jz_pos + 1] = (((jz_disp / 256) % 256) + 256) % 256
+        ctx.code_data[jz_pos + 2] = (((jz_disp / 65536) % 256) + 256) % 256
+        ctx.code_data[jz_pos + 3] = (((jz_disp / 16777216) % 256) + 256) % 256
+        emit_mov_r64_imm64(ctx, RAX, 0)
+        // end_label:
+        let end_pos = ctx.code_len
+        let jmp_disp = end_pos - (jmp_pos + 4)
+        ctx.code_data[jmp_pos] = ((jmp_disp % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 1] = (((jmp_disp / 256) % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 2] = (((jmp_disp / 65536) % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 3] = (((jmp_disp / 16777216) % 256) + 256) % 256
+        return
+    if op == "or"
+        // left → RAX; if RAX!=0, skip right (result=1); else evaluate right
+        cg_expr(ctx, la[0])
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x85)
+        code_byte(ctx, 0xC0)  // TEST RAX, RAX
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0x85)  // JNE rel32
+        let jne_pos = ctx.code_len
+        code_u32(ctx, 0)
+        // Evaluate right → RAX
+        cg_expr(ctx, rb[0])
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x85)
+        code_byte(ctx, 0xC0)  // TEST RAX, RAX
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0x95)
+        code_byte(ctx, 0xC0)  // SETNE AL
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0xB6)
+        code_byte(ctx, 0xC0)  // MOVZX RAX, AL
+        // JMP end
+        code_byte(ctx, 0xE9)
+        let jmp_pos = ctx.code_len
+        code_u32(ctx, 0)
+        // true_label: RAX = 1
+        let true_pos = ctx.code_len
+        let jne_disp = true_pos - (jne_pos + 4)
+        ctx.code_data[jne_pos] = ((jne_disp % 256) + 256) % 256
+        ctx.code_data[jne_pos + 1] = (((jne_disp / 256) % 256) + 256) % 256
+        ctx.code_data[jne_pos + 2] = (((jne_disp / 65536) % 256) + 256) % 256
+        ctx.code_data[jne_pos + 3] = (((jne_disp / 16777216) % 256) + 256) % 256
+        emit_mov_r64_imm64(ctx, RAX, 1)
+        let end_pos = ctx.code_len
+        let jmp_disp = end_pos - (jmp_pos + 4)
+        ctx.code_data[jmp_pos] = ((jmp_disp % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 1] = (((jmp_disp / 256) % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 2] = (((jmp_disp / 65536) % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 3] = (((jmp_disp / 16777216) % 256) + 256) % 256
+        return
+
+    // Eager binary ops: evaluate left, push, evaluate right, pop into RBX
     cg_expr(ctx, la[0])
     emit_push_r64(ctx, RAX)
     cg_expr(ctx, rb[0])
     emit_pop_r64(ctx, RBX)
-    
+
     if op == "+"
         emit_add_r64_r64(ctx, RAX, RBX)
         return
@@ -2615,6 +2806,38 @@ fn cg_binary(ctx Ctx, e Node)
         emit_cqo(ctx)
         emit_idiv_r64(ctx, RCX)
         emit_mov_r64_r64(ctx, RAX, RDX)
+        return
+    // Bitwise ops: RAX = RBX OP RAX (RBX = left, RAX = right)
+    if op == "&"
+        // AND RAX, RBX
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x21)
+        code_byte(ctx, 0xD8)  // AND RAX, RBX
+        return
+    if op == "|"
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x09)
+        code_byte(ctx, 0xD8)  // OR RAX, RBX
+        return
+    if op == "^"
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x31)
+        code_byte(ctx, 0xD8)  // XOR RAX, RBX
+        return
+    if op == "<<"
+        // SHL RAX, CL (shift count must be in CL)
+        emit_mov_r64_r64(ctx, RCX, RAX)
+        emit_mov_r64_r64(ctx, RAX, RBX)
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0xD3)
+        code_byte(ctx, 0xE0)  // SHL RAX, CL
+        return
+    if op == ">>"
+        emit_mov_r64_r64(ctx, RCX, RAX)
+        emit_mov_r64_r64(ctx, RAX, RBX)
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0xD3)
+        code_byte(ctx, 0xF8)  // SAR RAX, CL (arithmetic shift)
         return
     if op == "=="
         emit_cmp_r64_r64(ctx, RBX, RAX)
@@ -2646,6 +2869,26 @@ fn cg_unary(ctx Ctx, e Node)
     cg_expr(ctx, oa[0])
     if e.sval == "-"
         emit_neg_r64(ctx, RAX)
+        return
+    if e.sval == "not"
+        // Logical NOT: RAX = (RAX == 0) ? 1 : 0
+        // TEST RAX, RAX; SETE AL; MOVZX RAX, AL
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x85)
+        code_byte(ctx, 0xC0)  // TEST RAX, RAX
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0x94)
+        code_byte(ctx, 0xC0)  // SETE AL
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0xB6)
+        code_byte(ctx, 0xC0)  // MOVZX RAX, AL
+        return
+    if e.sval == "~"
+        // Bitwise NOT: NOT RAX
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0xF7)
+        code_byte(ctx, 0xD0)  // NOT RAX
         return
 
 fn cg_call(ctx Ctx, e Node)
@@ -2831,6 +3074,21 @@ fn cg_stmt(ctx Ctx, s Node)
     if s.kind == "while_stmt"
         cg_while(ctx, s)
         return
+    if s.kind == "break"
+        // Emit JMP to end of current loop (forward, fixup later)
+        code_byte(ctx, 0xE9)  // JMP rel32
+        let pos = ctx.code_len
+        code_u32(ctx, 0)  // placeholder
+        ctx.break_fixups[ctx.break_fixup_count] = pos
+        ctx.break_fixup_count = ctx.break_fixup_count + 1
+        return
+    if s.kind == "continue"
+        // Emit JMP to loop start (continue_targets[loop_depth-1])
+        code_byte(ctx, 0xE9)  // JMP rel32
+        let target = ctx.continue_targets[ctx.loop_depth - 1]
+        let disp = target - (ctx.code_len + 4)
+        code_u32(ctx, disp)
+        return
 
 fn cg_if(ctx Ctx, s Node)
     // if_stmt has:
@@ -2905,6 +3163,13 @@ fn cg_while(ctx Ctx, s Node)
     //   s.a = {0: condition expr}
     //   s.list = body (table of statements)
     let loop_start = ctx.code_len
+
+    // Push loop context for break/continue
+    let saved_depth = ctx.loop_depth
+    let saved_break_count = ctx.break_fixup_count
+    ctx.continue_targets[ctx.loop_depth] = loop_start
+    ctx.loop_depth = ctx.loop_depth + 1
+
     let ca = s.a
     // Evaluate condition → RAX
     cg_expr(ctx, ca[0])
@@ -2935,6 +3200,20 @@ fn cg_while(ctx Ctx, s Node)
     ctx.code_data[jz_pos + 1] = (((jz_disp / 256) % 256) + 256) % 256
     ctx.code_data[jz_pos + 2] = (((jz_disp / 65536) % 256) + 256) % 256
     ctx.code_data[jz_pos + 3] = (((jz_disp / 16777216) % 256) + 256) % 256
+
+    // Fixup all break jumps emitted during this loop to point HERE
+    let mut bi = saved_break_count
+    while bi < ctx.break_fixup_count
+        let bpos = ctx.break_fixups[bi]
+        let bdisp = end_pos - (bpos + 4)
+        ctx.code_data[bpos] = ((bdisp % 256) + 256) % 256
+        ctx.code_data[bpos + 1] = (((bdisp / 256) % 256) + 256) % 256
+        ctx.code_data[bpos + 2] = (((bdisp / 65536) % 256) + 256) % 256
+        ctx.code_data[bpos + 3] = (((bdisp / 16777216) % 256) + 256) % 256
+        bi = bi + 1
+    // Restore loop context
+    ctx.break_fixup_count = saved_break_count
+    ctx.loop_depth = saved_depth
 
 fn cg_function(ctx Ctx, fn_decl Node, is_main bool)
     // Record function start offset

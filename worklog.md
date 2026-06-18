@@ -617,3 +617,63 @@ Stage Summary:
   2. Achieve a true multi-generation fixpoint: gen2 compiles combined.yilt → gen3, and gen2 == gen3.
   3. Add ARM, RISC-V, WASM codegen targets.
   4. Add PE (Windows) and Mach-O (macOS) linker support.
+
+---
+Task ID: 19-self-host-language-features
+Agent: main (Super Z)
+Task: Add missing language features to the self-host compiler's codegen and parser.
+
+Work Log:
+- Added break/continue support to the self-host codegen:
+  - Extended Ctx struct with loop_depth, break_targets, continue_targets, break_fixups, break_fixup_count fields.
+  - cg_while now pushes/pops loop context: saves loop_depth and break_fixup_count on entry, restores on exit.
+  - break emits JMP rel32 with a placeholder, recorded in break_fixups for later patching.
+  - continue emits JMP to continue_targets[loop_depth-1] (the loop start).
+  - After the loop body, all break fixups collected during this loop are patched to point to the loop end.
+
+- Added boolean literals to cg_expr:
+  - bool_true → MOV RAX, 1
+  - bool_false → MOV RAX, 0
+
+- Added short-circuit logical operators to cg_binary:
+  - `and`: evaluate left; if zero, result=0; else evaluate right, result = (right != 0) ? 1 : 0.
+  - `or`: evaluate left; if nonzero, result=1; else evaluate right, result = (right != 0) ? 1 : 0.
+  - Both use TEST + SETNE + MOVZX to normalize to 0/1.
+
+- Added bitwise operators to cg_binary:
+  - `&` (AND): AND RAX, RBX
+  - `|` (OR): OR RAX, RBX
+  - `^` (XOR): XOR RAX, RBX
+  - `<<` (SHL): shift count in CL, SHL RAX, CL
+  - `>>` (SAR): arithmetic right shift, SAR RAX, CL
+
+- Added unary operators to cg_unary:
+  - `not` (logical NOT): TEST RAX, RAX; SETE AL; MOVZX RAX, AL
+  - `~` (bitwise NOT): NOT RAX
+
+- Added bitwise operator precedence levels to the Yilt-written parser (stage2/parser.yilt):
+  - parse_bitor (|) — between parse_and and parse_bitxor
+  - parse_bitxor (^) — between parse_bitor and parse_bitand
+  - parse_bitand (&) — between parse_bitxor and parse_eq
+  - parse_shift (<< >>) — between parse_cmp and parse_add
+  - Full precedence chain: or < and < | < ^ < & < ==/!= < </<=/>/>= < <<</>>  < +/- < */%/ < unary
+
+- Fixed combine_yilt.sh to dynamically find the "Main entry point" section markers instead of using hardcoded line counts. This prevents functions from being accidentally truncated when new code is added to the parser.
+
+- Verified all new features work correctly:
+  - break/continue in a sum_even function: sum of even numbers 2..20 with continue (skip odd) and break (sum > 100) → 110 ✓
+  - Logical ops: 1 and 0 = 0, 1 or 0 = 1, not 0 = 1 ✓
+  - Bitwise ops: 12 & 10 = 8, 12 | 10 = 14, 12 ^ 10 = 6, 12 << 2 = 48, 12 >> 1 = 6 ✓
+
+- Self-compilation fixpoint STILL WORKS with the expanded source:
+  - Source size: 113,768 bytes (up from 103,950)
+  - Output: 80,108 bytes (up from 69,155), 139 functions (up from 135)
+  - Deterministic: MD5 08f69edd7fc8be71876498d207201dcb (byte-identical across runs)
+
+- All 240 Go tests pass. All 5 self-host built-in tests pass.
+
+Stage Summary:
+- The self-host compiler now supports: if/but/else, while, break/continue, function calls, recursion, all arithmetic ops, all comparison ops, all bitwise ops (& | ^ ~ << >>), all logical ops (and or not), boolean literals (true false), integer literals, string literals, let/let mut, assign, return.
+- Self-compilation fixpoint is maintained and verified deterministic.
+- The self-host compiler is becoming a "real" compiler — it can handle a substantial subset of Yilt.
+- Next: add struct/table literals and field access to the codegen, add for-in loops, add match statements.
