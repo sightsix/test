@@ -153,6 +153,13 @@ let T_SEMICOLON = 84  // ';' — not used by Yilt but emitted for safety
 // string literals store the (unescaped) content, f-strings store the raw
 // content including {expr} segments.  This matches the Go lexer's
 // behaviour where `Value` is always a string.
+// 256-byte string containing all byte values 0-255.
+// Used by byte_to_str to convert byte values to single-character strings.
+
+fn byte_to_str(b int) str
+    return ALL_BYTES.substr(b, b + 1)
+
+
 struct Token
     mut kind int
     mut value str       // source text or literal value
@@ -681,70 +688,13 @@ fn lex_char(l Lexer) Token
 //
 // Yilt doesn't expose a chr() function or char literals, so we build a
 // lookup table of all 256 byte values mapped to single-character strings.
-// This is done once at program startup via init_byte_table().
+// This is done once at program startup via .
 //
 // We use the module pattern: a global mutable table held inside a struct
 // field, initialised on first use.  Yilt doesn't allow top-level mutable
 // globals, so we wrap it in a function that returns the table (initialising
 // on first call).
 
-struct ByteTable
-    mut data table
-    mut initialized bool
-
-// Global byte table — Yilt doesn't allow top-level mutable globals or
-// struct literals as const expressions, so we use an empty table (which
-// IS a valid const expression) and populate it from init_byte_table().
-// The "initialized" flag is stored under a special key (-1) in the same
-// table to avoid needing a second global.
-let mut g_bytes_data = {}
-
-fn init_byte_table()
-    if g_bytes_data.has(-1)  // -1 is the "initialized" sentinel key
-        return
-    // Build the table by iterating over a constant string containing all
-    // 256 byte values.  We construct this string by concatenating ranges.
-    // For ASCII (0-127) we use a printable+control string; for 128-255 we
-    // use str.bytes() round-trip via a synthetic construction.
-    //
-    // Simpler approach: for each byte value 0-255, use str.substr on a
-    // precomputed 256-char string.  We build that string by concatenating
-    // printable chars and using byte tables for the rest.
-    //
-    // Even simpler: we know Yilt's str.bytes() gives us byte values, and
-    // str.substr(i, i+1) gives us the i-th character.  So we build a
-    // 256-byte source string once, then index into it.
-    let mut i = 0
-    while i < 256
-        // Use the runtime's str constructor via a synthetic approach:
-        // we can't easily build arbitrary byte strings in Yilt, so we
-        // precompute the printable ASCII range (32-126) using substr on
-        // a constant, and fall back to "?" for the rest.  The lexer
-        // only needs printable chars + newline/tab for string content.
-        if i >= 32 and i <= 126
-            let printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
-            let idx = i - 32
-            g_bytes_data[i] = printable.substr(idx, idx + 1)
-        but i == 10
-            g_bytes_data[i] = "\n"
-        but i == 9
-            g_bytes_data[i] = "\t"
-        but i == 13
-            g_bytes_data[i] = "\r"
-        but i == 0
-            g_bytes_data[i] = ""
-        else
-            // For non-printable bytes > 126, use a placeholder.  The lexer
-            // shouldn't encounter these in valid Yilt source, but if it
-            // does we'll at least not crash.
-            g_bytes_data[i] = "?"
-        i = i + 1
-    g_bytes_data[-1] = "yes"  // mark as initialized (string sentinel)
-
-fn byte_to_str(b int) str
-    if g_bytes_data.has(b)
-        return g_bytes_data[b]
-    return "?"
 
 // ---------------------------------------------------------------------------
 // Section 11: Operator lexing
@@ -916,7 +866,7 @@ fn lex_operator(l Lexer) Token
 // Lex the entire source.  Returns a table of Token structs (integer-keyed).
 // Also produces indentation tokens (INDENT/DEDENT) inline in the stream.
 fn lex_all(source str) table
-    init_byte_table()
+    
     let mut l = lex_new(source)
     let mut tokens = {}
     let mut idx = 0

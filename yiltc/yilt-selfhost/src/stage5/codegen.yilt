@@ -27,9 +27,10 @@ struct Ctx
     mut var_slots table
     mut next_slot int
     mut string_count int
+    mut fixup_count int
 
 fn ctx_new() Ctx
-    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0}
+    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0, fixup_count: 0}
     return ctx
 
 // ---------------------------------------------------------------------------
@@ -477,6 +478,34 @@ fn cg_add_string(ctx Ctx, s str) int
     ctx.string_count = idx + 1
     return idx
 
+// Record a LEA fixup: the LEA at code position 'lea_pos' should point
+// to data offset 'data_off'. After all code is generated, we patch the
+// displacement = (code_len - lea_pos - 7) + data_off.
+fn cg_add_fixup(ctx Ctx, lea_pos int, data_off int)
+    let idx = ctx.fixup_count
+    ctx.code_data[100000 + idx * 2] = lea_pos
+    ctx.code_data[100000 + idx * 2 + 1] = data_off
+    ctx.fixup_count = idx + 1
+
+// Apply all fixups: patch LEA displacements now that code_len is final.
+fn cg_apply_fixups(ctx Ctx)
+    let mut i = 0
+    while i < ctx.fixup_count
+        let lea_pos = ctx.code_data[100000 + i * 2]
+        let data_off = ctx.code_data[100000 + i * 2 + 1]
+        // LEA instruction is 7 bytes: REX(1) + 0x8D(1) + modrm(1) + disp32(4)
+        // disp32 starts at lea_pos + 3
+        // RIP after LEA = lea_pos + 7
+        // Target = code_len + data_off (data starts right after code)
+        // disp = target - rip = (code_len + data_off) - (lea_pos + 7)
+        let disp = (ctx.code_len + data_off) - (lea_pos + 7)
+        let imm_offset = lea_pos + 3
+        ctx.code_data[imm_offset] = ((disp % 256) + 256) % 256
+        ctx.code_data[imm_offset + 1] = (((disp / 256) % 256) + 256) % 256
+        ctx.code_data[imm_offset + 2] = (((disp / 65536) % 256) + 256) % 256
+        ctx.code_data[imm_offset + 3] = (((disp / 16777216) % 256) + 256) % 256
+        i = i + 1
+
 fn cg_expr(ctx Ctx, e Node)
     if e.kind == "int_lit"
         let val = parse_int(e.sval)
@@ -575,12 +604,21 @@ fn cg_call(ctx Ctx, e Node)
         if args.len() > 0
             let arg = args[0]
             if arg.kind == "string_lit"
-                let idx = cg_add_string(ctx, arg.sval)
-                emit_lea_rip(ctx, RSI, 0)
-                emit_mov_r64_imm64(ctx, RAX, 1)
-                emit_mov_r64_imm64(ctx, RDI, 1)
+                // Add string to data section, record its data offset
+                let data_off = ctx.data_len
+                cg_add_string(ctx, arg.sval)
+                // Emit LEA RSI, [rip + placeholder] and record fixup
+                let lea_pos = ctx.code_len
+                emit_lea_rip(ctx, RSI, 0)  // placeholder, will be fixed up
+                cg_add_fixup(ctx, lea_pos, data_off + 8)
+                // write(1, rsi, len)
+                emit_mov_r64_imm64(ctx, RAX, 1)   // SYS_write
+                emit_mov_r64_imm64(ctx, RDI, 1)   // stdout
                 emit_mov_r64_imm64(ctx, RDX, arg.sval.len())
                 emit_syscall(ctx)
+                return
+            // For integer expressions, convert to string manually
+            // For now, just skip non-string print args
             return
         return
     emit_nop(ctx)
@@ -666,6 +704,7 @@ fn compile_program(src str, output_path str) int
     
     let ctx = ctx_new()
     cg_function(ctx, main_fn)
+    cg_apply_fixups(ctx)
     
     let fd = sys.open(output_path, 577, 511)
     if fd < 0
@@ -715,7 +754,7 @@ fn main() int
     print("=== Yilt Self-Host Stage 5: Native Codegen ===")
     print("")
     
-    let src = "fn main() int\n    let x = 42\n    let y = x + 8\n    return y\n"
+    let src = "fn main() int\n    let x = 42\n    let y = x + 8\n    print(\"Result: \")\n    return y\n"
     
     print("Source:")
     print(src)
