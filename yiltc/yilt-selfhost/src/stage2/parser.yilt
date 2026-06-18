@@ -369,18 +369,28 @@ fn parse_params(p Parser) table
             if p_at(p, T_MUT)
                 p_advance(p)
                 mutable = true
+            let name_tok = p_expect(p, T_IDENT, "parameter name")
+            let mut ptype = ""
             let mut variadic = false
             if p_at(p, T_DOTDOTDOT)
                 p_advance(p)
                 variadic = true
-            let name_tok = p_expect(p, T_IDENT, "parameter name")
-            let mut ptype = ""
             if p_at(p, T_IDENT)
                 let tt = p_advance(p)
                 ptype = tt.value
+            let mut default_expr = n_kind("nil")
+            let mut has_default = false
+            if p_at(p, T_ASSIGN)
+                p_advance(p)
+                default_expr = parse_expr(p)
+                has_default = true
             let mut param = Node{kind: "param", sval: name_tok.value, ival: 0, bval: mutable, a: {}, b: {}, c: {}, list: {}, extra: ptype}
             if variadic
                 param.bval = true
+            if has_default
+                let mut da = {}
+                da[0] = default_expr
+                param.a = da
             params[idx] = param
             idx = idx + 1
     return params
@@ -540,6 +550,11 @@ fn parse_stmt(p Parser) Node
         return n_kind("continue")
     if kind == T_ASSERT
         return parse_assert_stmt(p)
+    if kind == T_PUB
+        p_advance(p)
+        return parse_fn_decl(p, true)
+    if kind == T_FN
+        return parse_fn_decl(p, false)
     let e = parse_expr(p)
     if p_at(p, T_ASSIGN)
         p_advance(p)
@@ -561,6 +576,30 @@ fn parse_let_stmt(p Parser) Node
     if p_at(p, T_MUT)
         p_advance(p)
         mutable = true
+    if p_at(p, T_LPAREN)
+        p_advance(p)
+        let mut names = {}
+        let mut idx = 0
+        let mut done = false
+        while not done
+            if p_at(p, T_RPAREN) or p_at(p, T_EOF)
+                done = true
+            if not done
+                if idx > 0
+                    p_expect(p, T_COMMA, "','")
+                    if p_at(p, T_RPAREN)
+                        done = true
+                if not done
+                    let nt = p_expect(p, T_IDENT, "variable name")
+                    names[idx] = nt.value
+                    idx = idx + 1
+        p_expect(p, T_RPAREN, "')'")
+        p_expect(p, T_ASSIGN, "'='")
+        let value = parse_expr(p)
+        let mut va = {}
+        va[0] = value
+        let mut n = Node{kind: "let_tuple", sval: "", ival: 0, bval: mutable, a: va, b: {}, c: {}, list: names, extra: ""}
+        return n
     let name_tok = p_expect(p, T_IDENT, "variable name")
     let mut vtype = ""
     if p_at(p, T_IDENT)
@@ -578,7 +617,7 @@ fn parse_return_stmt(p Parser) Node
     let k = p_peek_kind(p)
     if k == T_DEDENT or k == T_EOF or k == T_INDENT
         return n_kind("return")
-    if k == T_INT_LIT or k == T_FLOAT_LIT or k == T_STRING_LIT or k == T_IDENT or k == T_LPAREN or k == T_TRUE or k == T_FALSE or k == T_NIL or k == T_MINUS or k == T_NOT or k == T_LBRACE or k == T_LBRACK
+    if k == T_INT_LIT or k == T_FLOAT_LIT or k == T_STRING_LIT or k == T_IDENT or k == T_LPAREN or k == T_TRUE or k == T_FALSE or k == T_NIL or k == T_MINUS or k == T_NOT or k == T_LBRACE or k == T_LBRACK or k == T_IF or k == T_MATCH
         let val = parse_expr(p)
         let mut va = {}
         va[0] = val
@@ -639,11 +678,20 @@ fn parse_for_stmt(p Parser) Node
         let v = p_expect(p, T_IDENT, "value variable")
         val_name = v.value
     p_expect(p, T_IN, "'in'")
-    let iter = parse_expr(p)
+    let low = parse_expr(p)
+    let mut is_range = false
+    let mut high = n_kind("empty")
+    if p_at(p, T_DOTDOT)
+        is_range = true
+        p_advance(p)
+        high = parse_expr(p)
     let body = parse_block(p)
     let mut ia = {}
-    ia[0] = iter
-    let mut n = Node{kind: "for_stmt", sval: key_tok.value, ival: 0, bval: false, a: ia, b: {}, c: {}, list: body, extra: val_name}
+    ia[0] = low
+    let mut rb = {}
+    if is_range
+        rb[0] = high
+    let mut n = Node{kind: "for_stmt", sval: key_tok.value, ival: 0, bval: is_range, a: ia, b: rb, c: {}, list: body, extra: val_name}
     return n
 
 fn parse_match_stmt(p Parser) Node
@@ -863,9 +911,39 @@ fn parse_postfix(p Parser) Node
             e = n_member(e, field.value)
         if k == T_LBRACK
             p_advance(p)
-            let index = parse_expr(p)
-            p_expect(p, T_RBRACK, "']'")
-            e = n_index(e, index)
+            // Check if this is a generic type argument list: ident, ident, ... ] (
+            let mut is_generic = false
+            if e.kind == "ident"
+                let save_pos = p.pos
+                let mut looks_generic = true
+                let mut first = true
+                while p_at(p, T_IDENT) or (not first and p_at(p, T_COMMA))
+                    if not first
+                        if not p_at(p, T_COMMA)
+                            looks_generic = false
+                        p_advance(p)
+                    if not p_at(p, T_IDENT)
+                        looks_generic = false
+                    if looks_generic
+                        p_advance(p)
+                    first = false
+                if p_at(p, T_RBRACK) and looks_generic
+                    p_advance(p)
+                    if p_at(p, T_LPAREN)
+                        is_generic = true
+                p.pos = save_pos
+            if is_generic
+                let mut done2 = false
+                while not done2
+                    if p_at(p, T_RBRACK)
+                        done2 = true
+                    if not done2
+                        p_advance(p)
+                p_advance(p)
+            if not is_generic
+                let index = parse_expr(p)
+                p_expect(p, T_RBRACK, "']'")
+                e = n_index(e, index)
         if k == T_LPAREN
             p_advance(p)
             let args = parse_args(p)
@@ -951,9 +1029,48 @@ fn parse_primary(p Parser) Node
         return parse_table_lit(p)
     if k == T_FN
         return parse_fn_expr(p)
+    if k == T_IF
+        return parse_if_expr(p)
+    if k == T_MATCH
+        return parse_match_stmt(p)
+    if k == T_SPAWN
+        p_advance(p)
+        let expr = parse_expr(p)
+        let mut ea = {}
+        ea[0] = expr
+        let mut n = Node{kind: "spawn", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
+        return n
+    if k == T_AWAIT
+        p_advance(p)
+        let expr = parse_expr(p)
+        let mut ea = {}
+        ea[0] = expr
+        let mut n = Node{kind: "await", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
+        return n
     p_error(p, "unexpected token: '" + tok.value + "'")
     p_advance(p)
     return n_kind("error")
+
+fn parse_if_expr(p Parser) Node
+    if p_at(p, T_IF)
+        p_advance(p)
+    let cond = parse_expr(p)
+    let then_block = parse_block(p)
+    let mut else_block = {}
+    if p_at(p, T_BUT)
+        p_advance(p)
+        let nested = parse_if_expr(p)
+        let mut ne = {}
+        ne[0] = nested
+        else_block = ne
+    if p_at(p, T_ELSE)
+        p_advance(p)
+        else_block = parse_block(p)
+    let mut ca = {}
+    ca[0] = cond
+    let mut n = Node{kind: "if_expr", sval: "", ival: 0, bval: false, a: ca, b: {}, c: {}, list: then_block, extra: ""}
+    n.b = else_block
+    return n
 
 fn parse_table_lit(p Parser) Node
     p_expect(p, T_LBRACE, "'{'")

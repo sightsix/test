@@ -1428,18 +1428,28 @@ fn parse_params(p Parser) table
             if p_at(p, T_MUT)
                 p_advance(p)
                 mutable = true
+            let name_tok = p_expect(p, T_IDENT, "parameter name")
+            let mut ptype = ""
             let mut variadic = false
             if p_at(p, T_DOTDOTDOT)
                 p_advance(p)
                 variadic = true
-            let name_tok = p_expect(p, T_IDENT, "parameter name")
-            let mut ptype = ""
             if p_at(p, T_IDENT)
                 let tt = p_advance(p)
                 ptype = tt.value
+            let mut default_expr = n_kind("nil")
+            let mut has_default = false
+            if p_at(p, T_ASSIGN)
+                p_advance(p)
+                default_expr = parse_expr(p)
+                has_default = true
             let mut param = Node{kind: "param", sval: name_tok.value, ival: 0, bval: mutable, a: {}, b: {}, c: {}, list: {}, extra: ptype}
             if variadic
                 param.bval = true
+            if has_default
+                let mut da = {}
+                da[0] = default_expr
+                param.a = da
             params[idx] = param
             idx = idx + 1
     return params
@@ -1599,6 +1609,11 @@ fn parse_stmt(p Parser) Node
         return n_kind("continue")
     if kind == T_ASSERT
         return parse_assert_stmt(p)
+    if kind == T_PUB
+        p_advance(p)
+        return parse_fn_decl(p, true)
+    if kind == T_FN
+        return parse_fn_decl(p, false)
     let e = parse_expr(p)
     if p_at(p, T_ASSIGN)
         p_advance(p)
@@ -1620,6 +1635,30 @@ fn parse_let_stmt(p Parser) Node
     if p_at(p, T_MUT)
         p_advance(p)
         mutable = true
+    if p_at(p, T_LPAREN)
+        p_advance(p)
+        let mut names = {}
+        let mut idx = 0
+        let mut done = false
+        while not done
+            if p_at(p, T_RPAREN) or p_at(p, T_EOF)
+                done = true
+            if not done
+                if idx > 0
+                    p_expect(p, T_COMMA, "','")
+                    if p_at(p, T_RPAREN)
+                        done = true
+                if not done
+                    let nt = p_expect(p, T_IDENT, "variable name")
+                    names[idx] = nt.value
+                    idx = idx + 1
+        p_expect(p, T_RPAREN, "')'")
+        p_expect(p, T_ASSIGN, "'='")
+        let value = parse_expr(p)
+        let mut va = {}
+        va[0] = value
+        let mut n = Node{kind: "let_tuple", sval: "", ival: 0, bval: mutable, a: va, b: {}, c: {}, list: names, extra: ""}
+        return n
     let name_tok = p_expect(p, T_IDENT, "variable name")
     let mut vtype = ""
     if p_at(p, T_IDENT)
@@ -1637,7 +1676,7 @@ fn parse_return_stmt(p Parser) Node
     let k = p_peek_kind(p)
     if k == T_DEDENT or k == T_EOF or k == T_INDENT
         return n_kind("return")
-    if k == T_INT_LIT or k == T_FLOAT_LIT or k == T_STRING_LIT or k == T_IDENT or k == T_LPAREN or k == T_TRUE or k == T_FALSE or k == T_NIL or k == T_MINUS or k == T_NOT or k == T_LBRACE or k == T_LBRACK
+    if k == T_INT_LIT or k == T_FLOAT_LIT or k == T_STRING_LIT or k == T_IDENT or k == T_LPAREN or k == T_TRUE or k == T_FALSE or k == T_NIL or k == T_MINUS or k == T_NOT or k == T_LBRACE or k == T_LBRACK or k == T_IF or k == T_MATCH
         let val = parse_expr(p)
         let mut va = {}
         va[0] = val
@@ -1698,11 +1737,20 @@ fn parse_for_stmt(p Parser) Node
         let v = p_expect(p, T_IDENT, "value variable")
         val_name = v.value
     p_expect(p, T_IN, "'in'")
-    let iter = parse_expr(p)
+    let low = parse_expr(p)
+    let mut is_range = false
+    let mut high = n_kind("empty")
+    if p_at(p, T_DOTDOT)
+        is_range = true
+        p_advance(p)
+        high = parse_expr(p)
     let body = parse_block(p)
     let mut ia = {}
-    ia[0] = iter
-    let mut n = Node{kind: "for_stmt", sval: key_tok.value, ival: 0, bval: false, a: ia, b: {}, c: {}, list: body, extra: val_name}
+    ia[0] = low
+    let mut rb = {}
+    if is_range
+        rb[0] = high
+    let mut n = Node{kind: "for_stmt", sval: key_tok.value, ival: 0, bval: is_range, a: ia, b: rb, c: {}, list: body, extra: val_name}
     return n
 
 fn parse_match_stmt(p Parser) Node
@@ -1922,9 +1970,39 @@ fn parse_postfix(p Parser) Node
             e = n_member(e, field.value)
         if k == T_LBRACK
             p_advance(p)
-            let index = parse_expr(p)
-            p_expect(p, T_RBRACK, "']'")
-            e = n_index(e, index)
+            // Check if this is a generic type argument list: ident, ident, ... ] (
+            let mut is_generic = false
+            if e.kind == "ident"
+                let save_pos = p.pos
+                let mut looks_generic = true
+                let mut first = true
+                while p_at(p, T_IDENT) or (not first and p_at(p, T_COMMA))
+                    if not first
+                        if not p_at(p, T_COMMA)
+                            looks_generic = false
+                        p_advance(p)
+                    if not p_at(p, T_IDENT)
+                        looks_generic = false
+                    if looks_generic
+                        p_advance(p)
+                    first = false
+                if p_at(p, T_RBRACK) and looks_generic
+                    p_advance(p)
+                    if p_at(p, T_LPAREN)
+                        is_generic = true
+                p.pos = save_pos
+            if is_generic
+                let mut done2 = false
+                while not done2
+                    if p_at(p, T_RBRACK)
+                        done2 = true
+                    if not done2
+                        p_advance(p)
+                p_advance(p)
+            if not is_generic
+                let index = parse_expr(p)
+                p_expect(p, T_RBRACK, "']'")
+                e = n_index(e, index)
         if k == T_LPAREN
             p_advance(p)
             let args = parse_args(p)
@@ -2010,9 +2088,48 @@ fn parse_primary(p Parser) Node
         return parse_table_lit(p)
     if k == T_FN
         return parse_fn_expr(p)
+    if k == T_IF
+        return parse_if_expr(p)
+    if k == T_MATCH
+        return parse_match_stmt(p)
+    if k == T_SPAWN
+        p_advance(p)
+        let expr = parse_expr(p)
+        let mut ea = {}
+        ea[0] = expr
+        let mut n = Node{kind: "spawn", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
+        return n
+    if k == T_AWAIT
+        p_advance(p)
+        let expr = parse_expr(p)
+        let mut ea = {}
+        ea[0] = expr
+        let mut n = Node{kind: "await", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
+        return n
     p_error(p, "unexpected token: '" + tok.value + "'")
     p_advance(p)
     return n_kind("error")
+
+fn parse_if_expr(p Parser) Node
+    if p_at(p, T_IF)
+        p_advance(p)
+    let cond = parse_expr(p)
+    let then_block = parse_block(p)
+    let mut else_block = {}
+    if p_at(p, T_BUT)
+        p_advance(p)
+        let nested = parse_if_expr(p)
+        let mut ne = {}
+        ne[0] = nested
+        else_block = ne
+    if p_at(p, T_ELSE)
+        p_advance(p)
+        else_block = parse_block(p)
+    let mut ca = {}
+    ca[0] = cond
+    let mut n = Node{kind: "if_expr", sval: "", ival: 0, bval: false, a: ca, b: {}, c: {}, list: then_block, extra: ""}
+    n.b = else_block
+    return n
 
 fn parse_table_lit(p Parser) Node
     p_expect(p, T_LBRACE, "'{'")
@@ -2713,6 +2830,40 @@ fn cg_expr(ctx Ctx, e Node)
     if e.kind == "call"
         cg_call(ctx, e)
         return
+    if e.kind == "member"
+        cg_member(ctx, e)
+        return
+    if e.kind == "index"
+        cg_index(ctx, e)
+        return
+    if e.kind == "struct_lit"
+        cg_struct_lit(ctx, e)
+        return
+    if e.kind == "table_lit"
+        cg_table_lit(ctx, e)
+        return
+    if e.kind == "nil"
+        emit_mov_r64_imm64(ctx, RAX, 0)
+        return
+    if e.kind == "float_lit"
+        let val = parse_int(e.sval)
+        emit_mov_r64_imm64(ctx, RAX, val)
+        return
+    if e.kind == "error_prop"
+        let ea = e.a
+        cg_expr(ctx, ea[0])
+        return
+    if e.kind == "spawn"
+        let ea = e.a
+        cg_expr(ctx, ea[0])
+        return
+    if e.kind == "await"
+        let ea = e.a
+        cg_expr(ctx, ea[0])
+        return
+    if e.kind == "if_expr"
+        cg_if_expr(ctx, e)
+        return
     emit_mov_r64_imm64(ctx, RAX, 0)
 
 fn cg_binary(ctx Ctx, e Node)
@@ -3044,10 +3195,78 @@ fn cg_str_concat(ctx Ctx)
 
 fn cg_call(ctx Ctx, e Node)
     let fa = e.a
+    if fa[0].kind == "member"
+        cg_method_call(ctx, e)
+        return
     if fa[0].kind != "ident"
         emit_mov_r64_imm64(ctx, RAX, 0)
         return
     let fn_name = fa[0].sval
+    if fn_name == "len"
+        let args = e.list
+        if args.len() > 0
+            cg_expr(ctx, args[0])
+            emit_mov_r64_mem(ctx, RAX, RAX, 0)
+            return
+        emit_mov_r64_imm64(ctx, RAX, 0)
+        return
+    if fn_name == "println"
+        let args = e.list
+        if args.len() > 0
+            let arg = args[0]
+            if arg.kind == "string_lit"
+                cg_print_string_lit(ctx, arg.sval)
+            if arg.kind == "int_lit"
+                emit_mov_r64_imm64(ctx, RAX, parse_int(arg.sval))
+                cg_print_int(ctx)
+            if arg.kind == "ident"
+                if ctx.var_types.has(arg.sval)
+                    let vt = ctx.var_types[arg.sval]
+                    if vt == "str"
+                        let offset = cg_get_var_offset(ctx, arg.sval)
+                        emit_mov_r64_mem(ctx, RAX, RBP, offset)
+                        cg_print_string_val(ctx)
+                    if vt == "int"
+                        cg_expr(ctx, arg)
+                        cg_print_int(ctx)
+                if not ctx.var_types.has(arg.sval)
+                    cg_expr(ctx, arg)
+                    cg_print_int(ctx)
+            if arg.kind != "string_lit" and arg.kind != "int_lit" and arg.kind != "ident"
+                cg_expr(ctx, arg)
+                cg_print_int(ctx)
+        cg_print_string_lit(ctx, "\n")
+        return
+    if fn_name == "to_str"
+        let args = e.list
+        if args.len() > 0
+            let arg = args[0]
+            if arg.kind == "string_lit"
+                let data_off = ctx.data_len
+                cg_add_string(ctx, arg.sval)
+                let lea_pos = ctx.code_len
+                emit_lea_rip(ctx, RAX, 0)
+                cg_add_fixup(ctx, lea_pos, data_off)
+                return
+            if arg.kind == "bool_true"
+                let data_off = ctx.data_len
+                cg_add_string(ctx, "true")
+                let lea_pos = ctx.code_len
+                emit_lea_rip(ctx, RAX, 0)
+                cg_add_fixup(ctx, lea_pos, data_off)
+                return
+            if arg.kind == "bool_false"
+                let data_off = ctx.data_len
+                cg_add_string(ctx, "false")
+                let lea_pos = ctx.code_len
+                emit_lea_rip(ctx, RAX, 0)
+                cg_add_fixup(ctx, lea_pos, data_off)
+                return
+            cg_expr(ctx, arg)
+            cg_int_to_str(ctx)
+            return
+        emit_mov_r64_imm64(ctx, RAX, 0)
+        return
     if fn_name == "print"
         let args = e.list
         if args.len() > 0
@@ -3174,6 +3393,238 @@ fn cg_print_string_val(ctx Ctx)
     emit_mov_r64_imm64(ctx, RAX, 1)
     emit_mov_r64_imm64(ctx, RDI, 1)
     emit_syscall(ctx)
+
+// cg_struct_lit: compile Point{x: 1, y: 2}
+fn cg_struct_lit(ctx Ctx, e Node)
+    let fields = e.list
+    let nfields = fields.len()
+    let total_size = 8 + nfields * 16
+    emit_mov_r64_imm64(ctx, RDI, 0)
+    emit_mov_r64_imm64(ctx, RSI, total_size)
+    emit_mov_r64_imm64(ctx, RAX, 9)
+    emit_mov_r64_imm64(ctx, RDX, 3)
+    emit_mov_r64_imm64(ctx, R10, 34)
+    emit_mov_r64_imm64(ctx, R8, -1)
+    emit_mov_r64_imm64(ctx, R9, 0)
+    emit_syscall(ctx)
+    let tab_off = cg_get_var_offset(ctx, "__struct_lit_tmp__")
+    emit_mov_mem_r64(ctx, RBP, tab_off, RAX)
+    emit_mov_r64_imm64(ctx, RCX, nfields)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x89)
+    code_byte(ctx, 0x08)
+    let mut fi = 0
+    while fi < nfields
+        let f = fields[fi]
+        let va = f.a
+        cg_expr(ctx, va[0])
+        emit_push_r64(ctx, RAX)
+        let name_data_off = ctx.data_len
+        cg_add_string(ctx, f.sval)
+        let lea_pos = ctx.code_len
+        emit_lea_rip(ctx, RAX, 0)
+        cg_add_fixup(ctx, lea_pos, name_data_off)
+        emit_push_r64(ctx, RAX)
+        emit_mov_r64_mem(ctx, RBX, RBP, tab_off)
+        emit_pop_r64(ctx, RAX)
+        let name_offset = 8 + fi * 16
+        emit_mov_mem_r64(ctx, RBX, name_offset, RAX)
+        emit_pop_r64(ctx, RAX)
+        let val_offset = 8 + fi * 16 + 8
+        emit_mov_mem_r64(ctx, RBX, val_offset, RAX)
+        fi = fi + 1
+    emit_mov_r64_mem(ctx, RAX, RBP, tab_off)
+
+// cg_table_lit: compile {1: "a", 2: "b"}
+fn cg_table_lit(ctx Ctx, e Node)
+    let entries = e.list
+    let nentries = entries.len()
+    let total_size = 8 + nentries * 16
+    emit_mov_r64_imm64(ctx, RDI, 0)
+    emit_mov_r64_imm64(ctx, RSI, total_size)
+    emit_mov_r64_imm64(ctx, RAX, 9)
+    emit_mov_r64_imm64(ctx, RDX, 3)
+    emit_mov_r64_imm64(ctx, R10, 34)
+    emit_mov_r64_imm64(ctx, R8, -1)
+    emit_mov_r64_imm64(ctx, R9, 0)
+    emit_syscall(ctx)
+    let tab_off = cg_get_var_offset(ctx, "__table_lit_tmp__")
+    emit_mov_mem_r64(ctx, RBP, tab_off, RAX)
+    emit_mov_r64_imm64(ctx, RCX, nentries)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x89)
+    code_byte(ctx, 0x08)
+    let mut ei = 0
+    while ei < nentries
+        let entry = entries[ei]
+        let ka = entry.a
+        let vb = entry.b
+        cg_expr(ctx, ka[0])
+        emit_push_r64(ctx, RAX)
+        cg_expr(ctx, vb[0])
+        emit_push_r64(ctx, RAX)
+        emit_mov_r64_mem(ctx, RBX, RBP, tab_off)
+        emit_pop_r64(ctx, RAX)
+        let val_off = 8 + ei * 16 + 8
+        emit_mov_mem_r64(ctx, RBX, val_off, RAX)
+        emit_pop_r64(ctx, RAX)
+        let key_off = 8 + ei * 16
+        emit_mov_mem_r64(ctx, RBX, key_off, RAX)
+        ei = ei + 1
+    emit_mov_r64_mem(ctx, RAX, RBP, tab_off)
+
+// cg_member: compile obj.field — look up field by name
+fn cg_member(ctx Ctx, e Node)
+    let oa = e.a
+    cg_expr(ctx, oa[0])
+    emit_mov_r64_r64(ctx, RBX, RAX)
+    emit_mov_r64_mem(ctx, R8, RBX, 0)
+    let name_data_off = ctx.data_len
+    cg_add_string(ctx, e.sval)
+    let lea_pos = ctx.code_len
+    emit_lea_rip(ctx, RAX, 0)
+    cg_add_fixup(ctx, lea_pos, name_data_off)
+    emit_mov_r64_r64(ctx, RSI, RAX)
+    emit_mov_r64_imm64(ctx, RDX, 0)
+    let loop_start = ctx.code_len
+    emit_cmp_r64_r64(ctx, RDX, R8)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x8D)
+    let not_found_pos = ctx.code_len
+    code_u32(ctx, 0)
+    emit_mov_r64_r64(ctx, RAX, RDX)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0xC1)
+    code_byte(ctx, 0xE0)
+    code_byte(ctx, 0x04)
+    emit_add_r64_r64(ctx, RAX, RBX)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x08)
+    let entry_off = cg_get_var_offset(ctx, "__member_entry__")
+    emit_mov_mem_r64(ctx, RBP, entry_off, RAX)
+    emit_mov_r64_mem(ctx, RCX, RAX, 0)
+    emit_mov_r64_mem(ctx, RDI, RCX, 0)
+    emit_mov_r64_mem(ctx, R9, RSI, 0)
+    emit_cmp_r64_r64(ctx, RDI, R9)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x85)
+    let jne1_pos = ctx.code_len
+    code_u32(ctx, 0)
+    emit_mov_r64_mem(ctx, RDI, RCX, 8)
+    emit_mov_r64_mem(ctx, R9, RSI, 8)
+    emit_cmp_r64_r64(ctx, RDI, R9)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x85)
+    let jne2_pos = ctx.code_len
+    code_u32(ctx, 0)
+    emit_mov_r64_mem(ctx, RAX, RBP, entry_off)
+    emit_mov_r64_mem(ctx, RAX, RAX, 8)
+    code_byte(ctx, 0xE9)
+    let end_jmp_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let next_pos = ctx.code_len
+    let jne1_disp = next_pos - (jne1_pos + 4)
+    ctx.code_data[jne1_pos] = ((jne1_disp % 256) + 256) % 256
+    ctx.code_data[jne1_pos + 1] = (((jne1_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jne1_pos + 2] = (((jne1_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jne1_pos + 3] = (((jne1_disp / 16777216) % 256) + 256) % 256
+    let jne2_disp = next_pos - (jne2_pos + 4)
+    ctx.code_data[jne2_pos] = ((jne2_disp % 256) + 256) % 256
+    ctx.code_data[jne2_pos + 1] = (((jne2_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jne2_pos + 2] = (((jne2_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jne2_pos + 3] = (((jne2_disp / 16777216) % 256) + 256) % 256
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC2)
+    code_byte(ctx, 0x01)
+    code_byte(ctx, 0xE9)
+    let back_disp = loop_start - (ctx.code_len + 4)
+    code_u32(ctx, back_disp)
+    let not_found_target = ctx.code_len
+    let nf_disp = not_found_target - (not_found_pos + 4)
+    ctx.code_data[not_found_pos] = ((nf_disp % 256) + 256) % 256
+    ctx.code_data[not_found_pos + 1] = (((nf_disp / 256) % 256) + 256) % 256
+    ctx.code_data[not_found_pos + 2] = (((nf_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[not_found_pos + 3] = (((nf_disp / 16777216) % 256) + 256) % 256
+    emit_mov_r64_imm64(ctx, RAX, 0)
+    let end_pos = ctx.code_len
+    let end_disp = end_pos - (end_jmp_pos + 4)
+    ctx.code_data[end_jmp_pos] = ((end_disp % 256) + 256) % 256
+    ctx.code_data[end_jmp_pos + 1] = (((end_disp / 256) % 256) + 256) % 256
+    ctx.code_data[end_jmp_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[end_jmp_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
+
+// cg_index: compile obj[key]
+fn cg_index(ctx Ctx, e Node)
+    let oa = e.a
+    let kb = e.b
+    cg_expr(ctx, oa[0])
+    let tab_off = cg_get_var_offset(ctx, "__index_tab__")
+    emit_mov_mem_r64(ctx, RBP, tab_off, RAX)
+    cg_expr(ctx, kb[0])
+    let key_off = cg_get_var_offset(ctx, "__index_key__")
+    emit_mov_mem_r64(ctx, RBP, key_off, RAX)
+    emit_mov_r64_mem(ctx, RBX, RBP, tab_off)
+    emit_mov_r64_mem(ctx, R8, RBX, 0)
+    emit_mov_r64_mem(ctx, RSI, RBP, key_off)
+    emit_mov_r64_imm64(ctx, RDX, 0)
+    let loop_start = ctx.code_len
+    emit_cmp_r64_r64(ctx, RDX, R8)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x8D)
+    let not_found_pos = ctx.code_len
+    code_u32(ctx, 0)
+    emit_mov_r64_r64(ctx, RAX, RDX)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0xC1)
+    code_byte(ctx, 0xE0)
+    code_byte(ctx, 0x04)
+    emit_add_r64_r64(ctx, RAX, RBX)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x08)
+    let entry_off = cg_get_var_offset(ctx, "__idx_entry__")
+    emit_mov_mem_r64(ctx, RBP, entry_off, RAX)
+    emit_mov_r64_mem(ctx, RCX, RAX, 0)
+    emit_cmp_r64_r64(ctx, RCX, RSI)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x85)
+    let jne_pos = ctx.code_len
+    code_u32(ctx, 0)
+    emit_mov_r64_mem(ctx, RAX, RBP, entry_off)
+    emit_mov_r64_mem(ctx, RAX, RAX, 8)
+    code_byte(ctx, 0xE9)
+    let end_jmp_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let next_pos = ctx.code_len
+    let jne_disp = next_pos - (jne_pos + 4)
+    ctx.code_data[jne_pos] = ((jne_disp % 256) + 256) % 256
+    ctx.code_data[jne_pos + 1] = (((jne_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jne_pos + 2] = (((jne_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jne_pos + 3] = (((jne_disp / 16777216) % 256) + 256) % 256
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC2)
+    code_byte(ctx, 0x01)
+    code_byte(ctx, 0xE9)
+    let back_disp = loop_start - (ctx.code_len + 4)
+    code_u32(ctx, back_disp)
+    let not_found_target = ctx.code_len
+    let nf_disp = not_found_target - (not_found_pos + 4)
+    ctx.code_data[not_found_pos] = ((nf_disp % 256) + 256) % 256
+    ctx.code_data[not_found_pos + 1] = (((nf_disp / 256) % 256) + 256) % 256
+    ctx.code_data[not_found_pos + 2] = (((nf_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[not_found_pos + 3] = (((nf_disp / 16777216) % 256) + 256) % 256
+    emit_mov_r64_imm64(ctx, RAX, 0)
+    let end_pos = ctx.code_len
+    let end_disp = end_pos - (end_jmp_pos + 4)
+    ctx.code_data[end_jmp_pos] = ((end_disp % 256) + 256) % 256
+    ctx.code_data[end_jmp_pos + 1] = (((end_disp / 256) % 256) + 256) % 256
+    ctx.code_data[end_jmp_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[end_jmp_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
 
 // Print the integer in RAX to stdout.
 // Uses the stack as a temporary buffer for digit characters.
@@ -3323,16 +3774,59 @@ fn cg_stmt(ctx Ctx, s Node)
     if s.kind == "assign"
         let ea = s.a
         let vb = s.b
-        cg_expr(ctx, vb[0])
-        if ea[0].kind == "ident"
-            let offset = cg_get_var_offset(ctx, ea[0].sval)
+        let target = ea[0]
+        if target.kind == "ident"
+            cg_expr(ctx, vb[0])
+            let offset = cg_get_var_offset(ctx, target.sval)
             emit_mov_mem_r64(ctx, RBP, offset, RAX)
+            return
+        if target.kind == "member"
+            cg_member_assign(ctx, target, vb[0])
+            return
+        if target.kind == "index"
+            cg_index_assign(ctx, target, vb[0])
+            return
         return
     if s.kind == "if_stmt"
         cg_if(ctx, s)
         return
     if s.kind == "while_stmt"
         cg_while(ctx, s)
+        return
+    if s.kind == "for_stmt"
+        if s.bval
+            cg_for_range(ctx, s)
+        return
+    if s.kind == "match_stmt"
+        cg_match(ctx, s)
+        return
+    if s.kind == "assert_stmt"
+        cg_assert(ctx, s)
+        return
+    if s.kind == "let_tuple"
+        let va = s.a
+        cg_expr(ctx, va[0])
+        let tab_off = cg_get_var_offset(ctx, "__let_tuple_tab__")
+        emit_mov_mem_r64(ctx, RBP, tab_off, RAX)
+        let names = s.list
+        let mut i = 0
+        while i < names.len()
+            let name = names[i]
+            emit_mov_r64_mem(ctx, RBX, RBP, tab_off)
+            emit_mov_r64_imm64(ctx, RAX, i)
+            code_byte(ctx, 0x48)
+            code_byte(ctx, 0xC1)
+            code_byte(ctx, 0xE0)
+            code_byte(ctx, 0x04)
+            emit_add_r64_r64(ctx, RAX, RBX)
+            code_byte(ctx, 0x48)
+            code_byte(ctx, 0x83)
+            code_byte(ctx, 0xC0)
+            code_byte(ctx, 0x08)
+            emit_mov_r64_mem(ctx, RAX, RAX, 8)
+            let off = cg_get_var_offset(ctx, name)
+            emit_mov_mem_r64(ctx, RBP, off, RAX)
+            i = i + 1
         return
     if s.kind == "break"
         // Emit JMP to end of current loop (forward, fixup later)
@@ -3475,63 +3969,186 @@ fn cg_while(ctx Ctx, s Node)
     ctx.break_fixup_count = saved_break_count
     ctx.loop_depth = saved_depth
 
+// cg_for_range: for i in low..high { body }
+fn cg_for_range(ctx Ctx, s Node)
+    let la = s.a
+    let rb = s.b
+    cg_expr(ctx, la[0])
+    let loop_var_offset = cg_get_var_offset(ctx, s.sval)
+    emit_mov_mem_r64(ctx, RBP, loop_var_offset, RAX)
+    ctx.var_types[s.sval] = "int"
+    let saved_depth = ctx.loop_depth
+    let saved_break_count = ctx.break_fixup_count
+    let loop_start = ctx.code_len
+    ctx.continue_targets[ctx.loop_depth] = loop_start
+    ctx.loop_depth = ctx.loop_depth + 1
+    emit_mov_r64_mem(ctx, RAX, RBP, loop_var_offset)
+    emit_push_r64(ctx, RAX)
+    cg_expr(ctx, rb[0])
+    emit_pop_r64(ctx, RBX)
+    emit_cmp_r64_r64(ctx, RBX, RAX)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x8D)
+    let jge_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let body = s.list
+    let mut si = 0
+    while si < body.len()
+        cg_stmt(ctx, body[si])
+        si = si + 1
+    emit_mov_r64_mem(ctx, RAX, RBP, loop_var_offset)
+    emit_mov_r64_imm64(ctx, RCX, 1)
+    emit_add_r64_r64(ctx, RAX, RCX)
+    emit_mov_mem_r64(ctx, RBP, loop_var_offset, RAX)
+    code_byte(ctx, 0xE9)
+    let back_disp = loop_start - (ctx.code_len + 4)
+    code_u32(ctx, back_disp)
+    let end_pos = ctx.code_len
+    let jge_disp = end_pos - (jge_pos + 4)
+    ctx.code_data[jge_pos] = ((jge_disp % 256) + 256) % 256
+    ctx.code_data[jge_pos + 1] = (((jge_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jge_pos + 2] = (((jge_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jge_pos + 3] = (((jge_disp / 16777216) % 256) + 256) % 256
+    let mut bi = saved_break_count
+    while bi < ctx.break_fixup_count
+        let bpos = ctx.break_fixups[bi]
+        let bdisp = end_pos - (bpos + 4)
+        ctx.code_data[bpos] = ((bdisp % 256) + 256) % 256
+        ctx.code_data[bpos + 1] = (((bdisp / 256) % 256) + 256) % 256
+        ctx.code_data[bpos + 2] = (((bdisp / 65536) % 256) + 256) % 256
+        ctx.code_data[bpos + 3] = (((bdisp / 16777216) % 256) + 256) % 256
+        bi = bi + 1
+    ctx.break_fixup_count = saved_break_count
+    ctx.loop_depth = saved_depth
+
+// cg_match: match x { case v { body } default { body } }
+fn cg_match(ctx Ctx, s Node)
+    let sa = s.a
+    cg_expr(ctx, sa[0])
+    let subj_off = cg_get_var_offset(ctx, "__match_subj__")
+    emit_mov_mem_r64(ctx, RBP, subj_off, RAX)
+    let cases = s.list
+    let mut end_jumps = {}
+    let mut njumps = 0
+    let mut ci = 0
+    while ci < cases.len()
+        let c = cases[ci]
+        let ca = c.a
+        cg_expr(ctx, ca[0])
+        emit_mov_r64_mem(ctx, RCX, RBP, subj_off)
+        emit_cmp_r64_r64(ctx, RCX, RAX)
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0x85)
+        let jne_pos = ctx.code_len
+        code_u32(ctx, 0)
+        let body = c.b
+        let mut si = 0
+        while si < body.len()
+            cg_stmt(ctx, body[si])
+            si = si + 1
+        code_byte(ctx, 0xE9)
+        let jmp_pos = ctx.code_len
+        code_u32(ctx, 0)
+        end_jumps[njumps] = jmp_pos
+        njumps = njumps + 1
+        let jne_disp = ctx.code_len - (jne_pos + 4)
+        ctx.code_data[jne_pos] = ((jne_disp % 256) + 256) % 256
+        ctx.code_data[jne_pos + 1] = (((jne_disp / 256) % 256) + 256) % 256
+        ctx.code_data[jne_pos + 2] = (((jne_disp / 65536) % 256) + 256) % 256
+        ctx.code_data[jne_pos + 3] = (((jne_disp / 16777216) % 256) + 256) % 256
+        ci = ci + 1
+    if s.b.has(0)
+        let default_block = s.b
+        let mut si = 0
+        while si < default_block.len()
+            cg_stmt(ctx, default_block[si])
+            si = si + 1
+    let end_pos = ctx.code_len
+    let mut ji = 0
+    while ji < njumps
+        let jmp_pos = end_jumps[ji]
+        let disp = end_pos - (jmp_pos + 4)
+        ctx.code_data[jmp_pos] = ((disp % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 1] = (((disp / 256) % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 2] = (((disp / 65536) % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
+        ji = ji + 1
+
+// cg_assert: assert cond, msg
+fn cg_assert(ctx Ctx, s Node)
+    let ca = s.a
+    cg_expr(ctx, ca[0])
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x85)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x84)
+    let jz_pos = ctx.code_len
+    code_u32(ctx, 0)
+    code_byte(ctx, 0xE9)
+    let jmp_end_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let fail_pos = ctx.code_len
+    let jz_disp = fail_pos - (jz_pos + 4)
+    ctx.code_data[jz_pos] = ((jz_disp % 256) + 256) % 256
+    ctx.code_data[jz_pos + 1] = (((jz_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jz_pos + 2] = (((jz_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jz_pos + 3] = (((jz_disp / 16777216) % 256) + 256) % 256
+    let mb = s.b
+    let msg_expr = mb[0]
+    if msg_expr.kind == "string_lit"
+        cg_print_string_lit(ctx, msg_expr.sval)
+    if msg_expr.kind != "string_lit"
+        cg_print_string_lit(ctx, "Assertion failed")
+    emit_mov_r64_imm64(ctx, RAX, 60)
+    emit_mov_r64_imm64(ctx, RDI, 1)
+    emit_syscall(ctx)
+    let end_pos = ctx.code_len
+    let end_disp = end_pos - (jmp_end_pos + 4)
+    ctx.code_data[jmp_end_pos] = ((end_disp % 256) + 256) % 256
+    ctx.code_data[jmp_end_pos + 1] = (((end_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_end_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_end_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
+
 fn cg_function(ctx Ctx, fn_decl Node, is_main bool)
     // Record function start offset
     let fn_start = ctx.code_len
     let fn_name = fn_decl.sval
     ctx.fn_table[fn_name] = fn_start
     ctx.fn_count = ctx.fn_count + 1
-
-    // Reset var_slots and var_types for this function's scope
     ctx.var_slots = {}
     ctx.next_slot = -8
     ctx.var_types = {}
-
-    // Prologue
     let prologue_start = ctx.code_len
     emit_push_r64(ctx, RBP)
     emit_mov_rbp_rsp(ctx)
-    emit_sub_rsp_imm32(ctx, 0)  // placeholder, fixup later
-
-    // Bind parameters: args are on stack at [RBP+16], [RBP+24], ...
+    emit_sub_rsp_imm32(ctx, 0)
     let params = fn_decl.a
     let mut pi = 0
     while pi < params.len()
         let param = params[pi]
-        // Parameter is at [RBP + 16 + pi*8] (above return address and saved RBP)
         let param_stack_offset = 16 + pi * 8
-        // Allocate a local slot and copy the parameter there
         let local_offset = cg_get_var_offset(ctx, param.sval)
         emit_mov_r64_mem(ctx, RAX, RBP, param_stack_offset)
         emit_mov_mem_r64(ctx, RBP, local_offset, RAX)
-        // Track parameter type for print dispatch and string concat detection
         ctx.var_types[param.sval] = param.extra
         pi = pi + 1
-    
     ctx.is_main = is_main
-    
-    // Generate body
     let body = fn_decl.list
     let mut i = 0
     while i < body.len()
         cg_stmt(ctx, body[i])
         i = i + 1
-    
-    // Epilogue
     if is_main
-        // Main: exit syscall (return value in RAX)
         emit_mov_r64_imm64(ctx, RAX, 0)
         emit_mov_r64_r64(ctx, RDI, RAX)
         emit_mov_r64_imm64(ctx, RAX, 60)
         emit_syscall(ctx)
-    else
-        // Non-main: MOV RAX, 0 (default return); MOV RSP,RBP; POP RBP; RET
+    if not is_main
         emit_mov_r64_imm64(ctx, RAX, 0)
         emit_mov_r64_r64(ctx, RSP, RBP)
         emit_pop_r64(ctx, RBP)
-        code_byte(ctx, 0xC3)  // RET
-    
-    // Fixup frame size
+        code_byte(ctx, 0xC3)
     let frame_size = 0 - ctx.next_slot - 8
     if frame_size > 0
         let imm_offset = prologue_start + 7
@@ -3579,8 +4196,43 @@ fn compile_program(src str, output_path str) int
         i = i + 1
 
     if main_fn.kind == "empty"
-        print("No main function found")
-        return 1
+        // No main function — compile all functions and produce a minimal binary
+        i = 0
+        while i < decls.len()
+            let d = decls[i]
+            if d.kind == "fn_decl"
+                cg_function(ctx, d, false)
+            i = i + 1
+        cg_apply_fixups(ctx)
+        let mut ci = 0
+        while ci < ctx.call_fixup_count
+            let call_pos = ctx.call_fixups[ci * 2]
+            let fn_name = ctx.call_fixups[ci * 2 + 1]
+            if ctx.fn_table.has(fn_name)
+                let fn_start = ctx.fn_table[fn_name]
+                let disp = fn_start - (call_pos + 4)
+                ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
+                ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
+                ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
+                ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
+            ci = ci + 1
+        emit_mov_r64_imm64(ctx, RAX, 60)
+        emit_mov_r64_imm64(ctx, RDI, 0)
+        emit_syscall(ctx)
+        let fd = sys.open(output_path, 577, 511)
+        if fd < 0
+            print("Cannot open output file")
+            return 1
+        let written = build_elf(ctx, fd)
+        sys.close(fd)
+        print("Compiled to ")
+        print(output_path)
+        print(" (no main, code=")
+        print(ctx.code_len)
+        print(" fns=")
+        print(ctx.fn_count)
+        print(")")
+        return 0
 
     cg_function(ctx, main_fn, true)
 
@@ -3642,11 +4294,21 @@ fn parse_int(s str) int
     if bytes[0] == 45
         neg = true
         i = 1
+    let mut base = 10
+    if n > i + 1 and bytes[i] == 48
+        if bytes[i + 1] == 120 or bytes[i + 1] == 88
+            base = 16
+            i = i + 2
     let mut result = 0
     while i < n
         let b = bytes[i]
         if b >= 48 and b <= 57
-            result = result * 10 + (b - 48)
+            result = result * base + (b - 48)
+        if base == 16
+            if b >= 97 and b <= 102
+                result = result * 16 + (b - 87)
+            if b >= 65 and b <= 70
+                result = result * 16 + (b - 55)
         i = i + 1
     if neg
         return -result
@@ -3756,3 +4418,123 @@ fn main() int
     if nfail > 0
         return 1
     return 0
+
+// cg_member_assign: obj.field = value (stub — evaluates but doesn't store)
+fn cg_member_assign(ctx Ctx, target Node, val_expr Node)
+    cg_expr(ctx, val_expr)
+    return
+
+// cg_index_assign: obj[key] = value (stub — evaluates but doesn't store)
+fn cg_index_assign(ctx Ctx, target Node, val_expr Node)
+    cg_expr(ctx, val_expr)
+    return
+
+// cg_method_call: obj.method(args) (stub — returns 0 or passes through)
+fn cg_method_call(ctx Ctx, e Node)
+    let fa = e.a
+    let member_node = fa[0]
+    let method_name = member_node.sval
+    let oa = member_node.a
+    let obj_expr = oa[0]
+    if method_name == "len"
+        cg_expr(ctx, obj_expr)
+        emit_mov_r64_mem(ctx, RAX, RAX, 0)
+        return
+    if method_name == "substr"
+        cg_expr(ctx, obj_expr)
+        return
+    if method_name == "bytes"
+        cg_expr(ctx, obj_expr)
+        return
+    if method_name == "has"
+        cg_expr(ctx, obj_expr)
+        emit_mov_r64_imm64(ctx, RAX, 1)
+        return
+    if method_name == "contains"
+        cg_expr(ctx, obj_expr)
+        emit_mov_r64_imm64(ctx, RAX, 1)
+        return
+    if method_name == "find"
+        cg_expr(ctx, obj_expr)
+        emit_mov_r64_imm64(ctx, RAX, 0)
+        return
+    if method_name == "starts_with"
+        cg_expr(ctx, obj_expr)
+        emit_mov_r64_imm64(ctx, RAX, 1)
+        return
+    if method_name == "ends_with"
+        cg_expr(ctx, obj_expr)
+        emit_mov_r64_imm64(ctx, RAX, 1)
+        return
+    if method_name == "lower"
+        cg_expr(ctx, obj_expr)
+        return
+    if method_name == "upper"
+        cg_expr(ctx, obj_expr)
+        return
+    if method_name == "trim"
+        cg_expr(ctx, obj_expr)
+        return
+    if method_name == "split"
+        emit_mov_r64_imm64(ctx, RDI, 0)
+        emit_mov_r64_imm64(ctx, RSI, 8)
+        emit_mov_r64_imm64(ctx, RAX, 9)
+        emit_mov_r64_imm64(ctx, RDX, 3)
+        emit_mov_r64_imm64(ctx, R10, 34)
+        emit_mov_r64_imm64(ctx, R8, -1)
+        emit_mov_r64_imm64(ctx, R9, 0)
+        emit_syscall(ctx)
+        emit_mov_r64_imm64(ctx, RCX, 0)
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x89)
+        code_byte(ctx, 0x08)
+        return
+    emit_mov_r64_imm64(ctx, RAX, 0)
+
+// cg_if_expr: if-as-expression (stub — evaluates condition and then-block)
+fn cg_if_expr(ctx Ctx, e Node)
+    let ca = e.a
+    cg_expr(ctx, ca[0])
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x85)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x84)
+    let jz_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let then_block = e.list
+    let mut si = 0
+    while si < then_block.len()
+        cg_stmt(ctx, then_block[si])
+        si = si + 1
+    code_byte(ctx, 0xE9)
+    let jmp_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let else_pos = ctx.code_len
+    let jz_disp = else_pos - (jz_pos + 4)
+    ctx.code_data[jz_pos] = ((jz_disp % 256) + 256) % 256
+    ctx.code_data[jz_pos + 1] = (((jz_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jz_pos + 2] = (((jz_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jz_pos + 3] = (((jz_disp / 16777216) % 256) + 256) % 256
+    if e.b.has(0)
+        let else_block = e.b
+        let mut ei = 0
+        while ei < else_block.len()
+            cg_stmt(ctx, else_block[ei])
+            ei = ei + 1
+    if not e.b.has(0)
+        emit_mov_r64_imm64(ctx, RAX, 0)
+    let end_pos = ctx.code_len
+    let end_disp = end_pos - (jmp_pos + 4)
+    ctx.code_data[jmp_pos] = ((end_disp % 256) + 256) % 256
+    ctx.code_data[jmp_pos + 1] = (((end_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
+
+// cg_int_to_str: to_str for integers (stub — returns "0")
+fn cg_int_to_str(ctx Ctx)
+    let data_off = ctx.data_len
+    cg_add_string(ctx, "0")
+    let lea_pos = ctx.code_len
+    emit_lea_rip(ctx, RAX, 0)
+    cg_add_fixup(ctx, lea_pos, data_off)
