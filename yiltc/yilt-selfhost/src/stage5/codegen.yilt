@@ -650,6 +650,116 @@ fn cg_stmt(ctx Ctx, s Node)
             let offset = cg_get_var_offset(ctx, ea[0].sval)
             emit_mov_mem_r64(ctx, RBP, offset, RAX)
         return
+    if s.kind == "if_stmt"
+        cg_if(ctx, s)
+        return
+    if s.kind == "while_stmt"
+        cg_while(ctx, s)
+        return
+
+fn cg_if(ctx Ctx, s Node)
+    // if_stmt has:
+    //   s.list = table of branch nodes (branch 0 = if, branch 1+ = but)
+    //   s.a = else block (may be empty)
+    // Each branch node has:
+    //   b.a = {0: condition expr}
+    //   b.b = block (table of statements)
+    let branches = s.list
+    let mut bi = 0
+    // Collect positions of forward jumps that need fixup (to skip to end)
+    let mut end_jumps = {}
+    let mut njumps = 0
+    while bi < branches.len()
+        let b = branches[bi]
+        let ca = b.a
+        // Evaluate condition → RAX
+        cg_expr(ctx, ca[0])
+        // TEST RAX, RAX → ZF=1 if RAX==0
+        // We use: OR RAX, RAX (sets ZF, doesn't change RAX)
+        // Encoding: 48 09 C0 = OR RAX, RAX
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x09)
+        code_byte(ctx, 0xC0)
+        // JZ end_of_this_branch (jump if zero/false)
+        // JZ rel32 = 0F 84 + disp32
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0x84)
+        let jz_pos = ctx.code_len
+        code_u32(ctx, 0)  // placeholder, fixup later
+        // Generate then-block
+        let block = b.b
+        let mut si = 0
+        while si < block.len()
+            cg_stmt(ctx, block[si])
+            si = si + 1
+        // JMP to end (skip remaining branches and else)
+        // JMP rel32 = E9 + disp32
+        code_byte(ctx, 0xE9)
+        let jmp_pos = ctx.code_len
+        code_u32(ctx, 0)  // placeholder
+        end_jumps[njumps] = jmp_pos
+        njumps = njumps + 1
+        // Fixup the JZ: it should jump to HERE (after the JMP)
+        let jz_disp = ctx.code_len - (jz_pos + 4)
+        ctx.code_data[jz_pos] = ((jz_disp % 256) + 256) % 256
+        ctx.code_data[jz_pos + 1] = (((jz_disp / 256) % 256) + 256) % 256
+        ctx.code_data[jz_pos + 2] = (((jz_disp / 65536) % 256) + 256) % 256
+        ctx.code_data[jz_pos + 3] = (((jz_disp / 16777216) % 256) + 256) % 256
+        bi = bi + 1
+    // Else block (if any)
+    if s.a.has(0)
+        let else_block = s.a
+        let mut si = 0
+        while si < else_block.len()
+            cg_stmt(ctx, else_block[si])
+            si = si + 1
+    // Fixup all end jumps to point HERE
+    let end_pos = ctx.code_len
+    let mut ji = 0
+    while ji < njumps
+        let jmp_pos = end_jumps[ji]
+        let disp = end_pos - (jmp_pos + 4)
+        ctx.code_data[jmp_pos] = ((disp % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 1] = (((disp / 256) % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 2] = (((disp / 65536) % 256) + 256) % 256
+        ctx.code_data[jmp_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
+        ji = ji + 1
+
+fn cg_while(ctx Ctx, s Node)
+    // while_stmt has:
+    //   s.a = {0: condition expr}
+    //   s.list = body (table of statements)
+    let loop_start = ctx.code_len
+    let ca = s.a
+    // Evaluate condition → RAX
+    cg_expr(ctx, ca[0])
+    // OR RAX, RAX (test if zero)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x09)
+    code_byte(ctx, 0xC0)
+    // JZ end (jump if false)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x84)
+    let jz_pos = ctx.code_len
+    code_u32(ctx, 0)  // placeholder
+    // Generate body
+    let body = s.list
+    let mut si = 0
+    while si < body.len()
+        cg_stmt(ctx, body[si])
+        si = si + 1
+    // JMP back to loop_start
+    // JMP rel32 = E9 + disp32
+    code_byte(ctx, 0xE9)
+    let back_disp = loop_start - (ctx.code_len + 4)
+    code_u32(ctx, back_disp)
+    // Fixup JZ to point HERE (end of loop)
+    let end_pos = ctx.code_len
+    let jz_disp = end_pos - (jz_pos + 4)
+    ctx.code_data[jz_pos] = ((jz_disp % 256) + 256) % 256
+    ctx.code_data[jz_pos + 1] = (((jz_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jz_pos + 2] = (((jz_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jz_pos + 3] = (((jz_disp / 16777216) % 256) + 256) % 256
 
 fn cg_function(ctx Ctx, fn_decl Node)
     let prologue_start = ctx.code_len
@@ -754,7 +864,7 @@ fn main() int
     print("=== Yilt Self-Host Stage 5: Native Codegen ===")
     print("")
     
-    let src = "fn main() int\n    let x = 42\n    let y = x + 8\n    print(\"Result: \")\n    return y\n"
+    let src = "fn main() int\n    let x = 10\n    if x > 5\n        print(\"big\\n\")\n    else\n        print(\"small\\n\")\n    let mut i = 0\n    let mut sum = 0\n    while i < 5\n        sum = sum + i\n        i = i + 1\n    print(\"sum=\")\n    return sum\n"
     
     print("Source:")
     print(src)
