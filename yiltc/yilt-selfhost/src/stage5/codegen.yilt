@@ -34,17 +34,21 @@ struct Ctx
     mut call_fixup_count int
     mut is_main bool
     // Loop context for break/continue.
-    // break_targets[n] = code position to jump to when `break` is hit at loop depth n
-    // continue_targets[n] = code position to jump to when `continue` is hit at loop depth n
-    // break_fixups/break_fixup_count = collected forward jump positions to patch at loop end
     mut loop_depth int
     mut break_targets table
     mut continue_targets table
     mut break_fixups table
     mut break_fixup_count int
+    // var_types tracks variable types for print dispatch.
+    // "str" = string (RAX = pointer to length-prefixed data)
+    // "int" = integer (RAX = raw value)
+    // "bool" = boolean (RAX = 0 or 1)
+    mut var_types table
+    // fn_ret_types maps function name → return type ("str", "int", "bool", "")
+    mut fn_ret_types table
 
 fn ctx_new() Ctx
-    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0, fixup_count: 0, fn_table: {}, fn_count: 0, call_fixups: {}, call_fixup_count: 0, is_main: false, loop_depth: 0, break_targets: {}, continue_targets: {}, break_fixups: {}, break_fixup_count: 0}
+    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0, fixup_count: 0, fn_table: {}, fn_count: 0, call_fixups: {}, call_fixup_count: 0, is_main: false, loop_depth: 0, break_targets: {}, continue_targets: {}, break_fixups: {}, break_fixup_count: 0, var_types: {}, fn_ret_types: {}}
     return ctx
 
 // ---------------------------------------------------------------------------
@@ -66,11 +70,14 @@ fn code_u32(ctx Ctx, v int)
     code_byte(ctx, (v / 16777216) % 256)
 
 fn code_u64(ctx Ctx, v int)
-    let mut val = v
+    // Extract 8 bytes using bit shifts and masking.
+    // This correctly handles negative values (two's complement) because
+    // Yilt's >> is arithmetic (SAR), which preserves the sign bit.
     let mut i = 0
     while i < 8
-        code_byte(ctx, val % 256)
-        val = val / 256
+        let shift = i * 8
+        let byte = (v >> shift) & 255
+        code_byte(ctx, byte)
         i = i + 1
 
 fn data_byte(ctx Ctx, v int)
@@ -104,6 +111,14 @@ let RSP = 4
 let RBP = 5
 let RSI = 6
 let RDI = 7
+let R8 = 8
+let R9 = 9
+let R10 = 10
+let R11 = 11
+let R12 = 12
+let R13 = 13
+let R14 = 14
+let R15 = 15
 
 fn ext(r int) bool
     return r >= 8
@@ -183,13 +198,22 @@ fn emit_sub_rsp_imm32(ctx Ctx, imm int)
 fn emit_mov_mem_r64(ctx Ctx, base int, offset int, src int)
     emit_rex(ctx, true, ext(src), ext(base))
     code_byte(ctx, 0x89)
-    code_byte(ctx, 0x40 + ((src % 8) * 8) + (base % 8))
+    // When base is RSP (4) or R12 (12), ModRM rm=100 requires a SIB byte.
+    if base % 8 == 4
+        code_byte(ctx, 0x40 + ((src % 8) * 8) + 4)
+        code_byte(ctx, 0x24)  // SIB: scale=00, index=100(none), base=100(RSP)
+    else
+        code_byte(ctx, 0x40 + ((src % 8) * 8) + (base % 8))
     code_byte(ctx, offset)
 
 fn emit_mov_r64_mem(ctx Ctx, dst int, base int, offset int)
     emit_rex(ctx, true, ext(dst), ext(base))
     code_byte(ctx, 0x8B)
-    code_byte(ctx, 0x40 + ((dst % 8) * 8) + (base % 8))
+    if base % 8 == 4
+        code_byte(ctx, 0x40 + ((dst % 8) * 8) + 4)
+        code_byte(ctx, 0x24)  // SIB: scale=00, index=100(none), base=100(RSP)
+    else
+        code_byte(ctx, 0x40 + ((dst % 8) * 8) + (base % 8))
     code_byte(ctx, offset)
 
 fn emit_cmp_r64_r64(ctx Ctx, dst int, src int)
@@ -400,7 +424,14 @@ fn cg_expr(ctx Ctx, e Node)
         emit_mov_r64_imm64(ctx, RAX, val)
         return
     if e.kind == "string_lit"
+        // Add string to data section and emit LEA with fixup.
+        // The data layout is: [len:8 | data... | null:1]
+        // RAX will point to the len prefix.
+        let data_off = ctx.data_len
+        cg_add_string(ctx, e.sval)
+        let lea_pos = ctx.code_len
         emit_lea_rip(ctx, RAX, 0)
+        cg_add_fixup(ctx, lea_pos, data_off)
         return
     if e.kind == "bool_true"
         emit_mov_r64_imm64(ctx, RAX, 1)
@@ -523,7 +554,11 @@ fn cg_binary(ctx Ctx, e Node)
     cg_expr(ctx, rb[0])
     emit_pop_r64(ctx, RBX)
 
+    // String concatenation: if both operands are strings, concat them.
     if op == "+"
+        if cg_is_string_expr(ctx, la[0]) and cg_is_string_expr(ctx, rb[0])
+            cg_str_concat(ctx)
+            return
         emit_add_r64_r64(ctx, RAX, RBX)
         return
     if op == "-"
@@ -610,8 +645,6 @@ fn cg_unary(ctx Ctx, e Node)
         emit_neg_r64(ctx, RAX)
         return
     if e.sval == "not"
-        // Logical NOT: RAX = (RAX == 0) ? 1 : 0
-        // TEST RAX, RAX; SETE AL; MOVZX RAX, AL
         code_byte(ctx, 0x48)
         code_byte(ctx, 0x85)
         code_byte(ctx, 0xC0)  // TEST RAX, RAX
@@ -624,11 +657,129 @@ fn cg_unary(ctx Ctx, e Node)
         code_byte(ctx, 0xC0)  // MOVZX RAX, AL
         return
     if e.sval == "~"
-        // Bitwise NOT: NOT RAX
         code_byte(ctx, 0x48)
         code_byte(ctx, 0xF7)
         code_byte(ctx, 0xD0)  // NOT RAX
         return
+
+// cg_is_string_expr returns true if the expression is known to produce a string.
+// Used to decide whether `+` means integer addition or string concatenation.
+fn cg_is_string_expr(ctx Ctx, e Node) bool
+    if e.kind == "string_lit"
+        return true
+    if e.kind == "ident"
+        if ctx.var_types.has(e.sval)
+            return ctx.var_types[e.sval] == "str"
+    if e.kind == "call"
+        let fa = e.a
+        if fa[0].kind == "ident"
+            let fname = fa[0].sval
+            if ctx.fn_ret_types.has(fname)
+                return ctx.fn_ret_types[fname] == "str"
+    if e.kind == "binary"
+        if e.sval == "+"
+            let la = e.a
+            let rb = e.b
+            return cg_is_string_expr(ctx, la[0]) and cg_is_string_expr(ctx, rb[0])
+    return false
+
+// cg_str_concat: concatenate two strings.
+// On entry: RBX = left string ptr (length-prefixed), RAX = right string ptr.
+// On exit: RAX = new string ptr (length-prefixed).
+// Allocates a new buffer via mmap, copies both strings, returns pointer.
+fn cg_str_concat(ctx Ctx)
+    // RBX = left ptr, RAX = right ptr
+    // Save both pointers on stack
+    emit_push_r64(ctx, RBX)  // [RSP] = left
+    emit_push_r64(ctx, RAX)  // [RSP] = right
+
+    // Load left len: RSI = [RBX]
+    emit_mov_r64_mem(ctx, RSI, RBX, 0)
+    // Load right len: RDI = [RAX]
+    emit_mov_r64_mem(ctx, RDI, RAX, 0)
+    // Total len = RSI + RDI
+    emit_add_r64_r64(ctx, RSI, RDI)
+    // Save total len in R12 (callee-saved)
+    // Actually we don't have R12 in our register set. Use stack.
+    emit_push_r64(ctx, RSI)  // [RSP] = total_len
+
+    // mmap(NULL, total_len + 8 + 1, PROT_RW, MAP_PRIVATE|MAP_ANON, -1, 0)
+    // RDI = 0 (addr)
+    emit_mov_r64_imm64(ctx, RDI, 0)
+    // RSI = total_len + 9 (8 for length prefix + 1 for null)
+    emit_mov_r64_mem(ctx, RSI, RSP, 0)  // reload total_len
+    emit_mov_r64_imm64(ctx, RAX, 9)
+    emit_add_r64_r64(ctx, RSI, RAX)
+    // RAX = 9 (SYS_mmap)
+    emit_mov_r64_imm64(ctx, RAX, 9)
+    // RDX = 3 (PROT_READ|PROT_WRITE)
+    emit_mov_r64_imm64(ctx, RDX, 3)
+    // R10 = 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
+    emit_mov_r64_imm64(ctx, R10, 34)
+    // R8 = -1
+    emit_mov_r64_imm64(ctx, R8, -1)
+    // R9 = 0
+    emit_mov_r64_imm64(ctx, R9, 0)
+    emit_syscall(ctx)
+    // RAX = new buffer pointer
+
+    // Save new buffer pointer
+    emit_push_r64(ctx, RAX)  // [RSP] = new_buf
+
+    // Store total_len at [new_buf]
+    emit_mov_r64_mem(ctx, RCX, RSP, 8)  // RCX = total_len (was pushed before new_buf)
+    // Actually stack layout: [RSP]=new_buf, [RSP+8]=total_len, [RSP+16]=right, [RSP+24]=left
+    emit_mov_r64_mem(ctx, RDX, RSP, 8)  // RDX = total_len
+    // Store len at [RAX]
+    // MOV [RAX], RDX
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x89)
+    code_byte(ctx, 0x10)  // MOV [RAX], RDX
+
+    // Copy left string data: memcpy([new_buf+8], [left+8], left_len)
+    // RDI = new_buf + 8
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x8D)
+    code_byte(ctx, 0x78)
+    code_byte(ctx, 0x08)  // LEA RDI, [RAX+8]
+    // RSI = left + 8
+    emit_mov_r64_mem(ctx, RSI, RSP, 24)  // RSI = left ptr
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC6)
+    code_byte(ctx, 0x08)  // ADD RSI, 8
+    // RCX = left_len = [left]
+    emit_mov_r64_mem(ctx, RCX, RSP, 24)  // reload left ptr
+    emit_mov_r64_mem(ctx, RCX, RCX, 0)   // RCX = [left] = left_len
+    // REP MOVSB
+    code_byte(ctx, 0xF3)
+    code_byte(ctx, 0xA4)  // REP MOVSB
+
+    // Copy right string data: memcpy([new_buf+8+left_len], [right+8], right_len)
+    // RDI = new_buf + 8 + left_len (already at this position after previous REP MOVSB)
+    // RSI = right + 8
+    emit_mov_r64_mem(ctx, RSI, RSP, 16)  // RSI = right ptr
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC6)
+    code_byte(ctx, 0x08)  // ADD RSI, 8
+    // RCX = right_len = [right]
+    emit_mov_r64_mem(ctx, RCX, RSP, 16)  // reload right ptr
+    emit_mov_r64_mem(ctx, RCX, RCX, 0)   // RCX = [right] = right_len
+    // REP MOVSB
+    code_byte(ctx, 0xF3)
+    code_byte(ctx, 0xA4)  // REP MOVSB
+
+    // Restore new_buf pointer to RAX
+    emit_pop_r64(ctx, RAX)   // RAX = new_buf, pop new_buf
+    // Clean up stack: pop total_len, right, left
+    emit_mov_r64_imm64(ctx, RCX, 24)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x01)
+    code_byte(ctx, 0xCC)  // ADD RSP, RCX
+    // RAX = new string pointer (length-prefixed)
+    // Mark result type as string
+    return
 
 fn cg_call(ctx Ctx, e Node)
     let fa = e.a
@@ -640,17 +791,62 @@ fn cg_call(ctx Ctx, e Node)
         let args = e.list
         if args.len() > 0
             let arg = args[0]
+            // Dispatch based on argument type
             if arg.kind == "string_lit"
-                let data_off = ctx.data_len
-                cg_add_string(ctx, arg.sval)
-                let lea_pos = ctx.code_len
-                emit_lea_rip(ctx, RSI, 0)
-                cg_add_fixup(ctx, lea_pos, data_off + 8)
-                emit_mov_r64_imm64(ctx, RAX, 1)
-                emit_mov_r64_imm64(ctx, RDI, 1)
-                emit_mov_r64_imm64(ctx, RDX, arg.sval.len())
-                emit_syscall(ctx)
+                cg_print_string_lit(ctx, arg.sval)
                 return
+            if arg.kind == "int_lit"
+                emit_mov_r64_imm64(ctx, RAX, parse_int(arg.sval))
+                cg_print_int(ctx)
+                return
+            if arg.kind == "bool_true"
+                cg_print_string_lit(ctx, "true")
+                return
+            if arg.kind == "bool_false"
+                cg_print_string_lit(ctx, "false")
+                return
+            if arg.kind == "ident"
+                // Check tracked variable type
+                if ctx.var_types.has(arg.sval)
+                    let vt = ctx.var_types[arg.sval]
+                    if vt == "str"
+                        // Load string pointer from stack, print it
+                        let offset = cg_get_var_offset(ctx, arg.sval)
+                        emit_mov_r64_mem(ctx, RAX, RBP, offset)
+                        cg_print_string_val(ctx)
+                        return
+                    if vt == "bool"
+                        let offset = cg_get_var_offset(ctx, arg.sval)
+                        emit_mov_r64_mem(ctx, RAX, RBP, offset)
+                        // TEST RAX, 1; JNE print_true; print_false
+                        code_byte(ctx, 0x48)
+                        code_byte(ctx, 0xF7)
+                        code_byte(ctx, 0xC0)  // TEST RAX, RAX (actually we want TEST RAX, 1)
+                        // Actually use: AND RAX, 1; JNZ true
+                        code_byte(ctx, 0x48)
+                        code_byte(ctx, 0x83)
+                        code_byte(ctx, 0xE0)
+                        code_byte(ctx, 0x01)  // AND RAX, 1
+                        code_byte(ctx, 0x75)  // JNE rel8
+                        let false_jmp = ctx.code_len
+                        code_byte(ctx, 0)  // placeholder, will fill in
+                        cg_print_string_lit(ctx, "true")
+                        code_byte(ctx, 0xEB)  // JMP rel8 (skip false)
+                        let skip_jmp = ctx.code_len
+                        code_byte(ctx, 0)  // placeholder
+                        // false target:
+                        let false_target = ctx.code_len
+                        ctx.code_data[false_jmp] = ((false_target - (false_jmp + 1)) + 256) % 256
+                        cg_print_string_lit(ctx, "false")
+                        // skip target:
+                        let skip_target = ctx.code_len
+                        ctx.code_data[skip_jmp] = ((skip_target - (skip_jmp + 1)) + 256) % 256
+                        return
+                // Default: treat as integer
+                cg_expr(ctx, arg)
+                cg_print_int(ctx)
+                return
+            // For any other expression type, evaluate and print as integer
             cg_expr(ctx, arg)
             cg_print_int(ctx)
             return
@@ -686,6 +882,37 @@ fn cg_call(ctx Ctx, e Node)
         code_u32(ctx, nargs * 8)
     // Return value is in RAX
     return
+
+// cg_print_string_lit: emit code to print a compile-time string literal.
+// Stores the string in the data section and emits a write syscall.
+fn cg_print_string_lit(ctx Ctx, s str)
+    let data_off = ctx.data_len
+    cg_add_string(ctx, s)
+    let lea_pos = ctx.code_len
+    emit_lea_rip(ctx, RSI, 0)
+    cg_add_fixup(ctx, lea_pos, data_off + 8)
+    emit_mov_r64_imm64(ctx, RAX, 1)   // SYS_write
+    emit_mov_r64_imm64(ctx, RDI, 1)   // stdout
+    emit_mov_r64_imm64(ctx, RDX, s.len())
+    emit_syscall(ctx)
+
+// cg_print_string_val: emit code to print a string whose pointer is in RAX.
+// The pointer points to a length-prefixed string: [len:8 | data...]
+fn cg_print_string_val(ctx Ctx)
+    // RAX = pointer to length prefix
+    // Save RAX in RBX (callee-saved across syscall)
+    emit_mov_r64_r64(ctx, RBX, RAX)
+    // Load length from [RBX] → RDX
+    emit_mov_r64_mem(ctx, RDX, RBX, 0)
+    // Compute data pointer: LEA RSI, [RBX+8]
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x8D)
+    code_byte(ctx, 0x73)
+    code_byte(ctx, 0x08)  // LEA RSI, [RBX+8]
+    // sys_write(1, RSI, RDX)
+    emit_mov_r64_imm64(ctx, RAX, 1)
+    emit_mov_r64_imm64(ctx, RDI, 1)
+    emit_syscall(ctx)
 
 // Print the integer in RAX to stdout.
 // Uses the stack as a temporary buffer for digit characters.
@@ -778,7 +1005,40 @@ fn cg_print_int(ctx Ctx)
 fn cg_stmt(ctx Ctx, s Node)
     if s.kind == "let_stmt"
         let va = s.a
-        cg_expr(ctx, va[0])
+        let init = va[0]
+        // Track variable type for print dispatch
+        if init.kind == "string_lit"
+            ctx.var_types[s.sval] = "str"
+        if init.kind == "int_lit"
+            ctx.var_types[s.sval] = "int"
+        if init.kind == "bool_true"
+            ctx.var_types[s.sval] = "bool"
+        if init.kind == "bool_false"
+            ctx.var_types[s.sval] = "bool"
+        if init.kind == "ident"
+            if ctx.var_types.has(init.sval)
+                ctx.var_types[s.sval] = ctx.var_types[init.sval]
+        if init.kind == "binary"
+            // String concatenation: if op is "+" and both sides are strings, result is string
+            if init.sval == "+"
+                let la = init.a
+                let rb = init.b
+                if cg_is_string_expr(ctx, la[0]) and cg_is_string_expr(ctx, rb[0])
+                    ctx.var_types[s.sval] = "str"
+        if init.kind == "call"
+            // Check function return type
+            let fa = init.a
+            if fa[0].kind == "ident"
+                let fname = fa[0].sval
+                if ctx.fn_ret_types.has(fname)
+                    let rt = ctx.fn_ret_types[fname]
+                    if rt == "str"
+                        ctx.var_types[s.sval] = "str"
+                    if rt == "int"
+                        ctx.var_types[s.sval] = "int"
+                    if rt == "bool"
+                        ctx.var_types[s.sval] = "bool"
+        cg_expr(ctx, init)
         let offset = cg_get_var_offset(ctx, s.sval)
         emit_mov_mem_r64(ctx, RBP, offset, RAX)
         return
@@ -960,17 +1220,18 @@ fn cg_function(ctx Ctx, fn_decl Node, is_main bool)
     let fn_name = fn_decl.sval
     ctx.fn_table[fn_name] = fn_start
     ctx.fn_count = ctx.fn_count + 1
-    
-    // Reset var_slots for this function's scope
+
+    // Reset var_slots and var_types for this function's scope
     ctx.var_slots = {}
     ctx.next_slot = -8
-    
+    ctx.var_types = {}
+
     // Prologue
     let prologue_start = ctx.code_len
     emit_push_r64(ctx, RBP)
     emit_mov_rbp_rsp(ctx)
     emit_sub_rsp_imm32(ctx, 0)  // placeholder, fixup later
-    
+
     // Bind parameters: args are on stack at [RBP+16], [RBP+24], ...
     let params = fn_decl.a
     let mut pi = 0
@@ -982,6 +1243,8 @@ fn cg_function(ctx Ctx, fn_decl Node, is_main bool)
         let local_offset = cg_get_var_offset(ctx, param.sval)
         emit_mov_r64_mem(ctx, RAX, RBP, param_stack_offset)
         emit_mov_mem_r64(ctx, RBP, local_offset, RAX)
+        // Track parameter type for print dispatch and string concat detection
+        ctx.var_types[param.sval] = param.extra
         pi = pi + 1
     
     ctx.is_main = is_main
@@ -1036,9 +1299,17 @@ fn compile_program(src str, output_path str) int
     let decls = result.decls
     let ctx = ctx_new()
 
+    // Pre-scan: record function return types for type dispatch in print.
+    let mut i = 0
+    while i < decls.len()
+        let d = decls[i]
+        if d.kind == "fn_decl"
+            ctx.fn_ret_types[d.sval] = d.extra
+        i = i + 1
+
     // Pass 1: Compile main first (entry point = start of code section)
     let mut main_fn = n_kind("empty")
-    let mut i = 0
+    i = 0
     while i < decls.len()
         let d = decls[i]
         if d.kind == "fn_decl"

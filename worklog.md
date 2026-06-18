@@ -677,3 +677,63 @@ Stage Summary:
 - Self-compilation fixpoint is maintained and verified deterministic.
 - The self-host compiler is becoming a "real" compiler — it can handle a substantial subset of Yilt.
 - Next: add struct/table literals and field access to the codegen, add for-in loops, add match statements.
+
+---
+Task ID: 20-self-host-string-support
+Agent: main (Super Z)
+Task: Add string operations, type tracking, and comprehensive print dispatch to the self-host compiler.
+
+Work Log:
+- Fixed code_u64 to handle negative values correctly using arithmetic right shifts and masking instead of integer division. Previously, -1 was encoded as FF 00 00 00 00 00 00 00 instead of FF FF FF FF FF FF FF FF, breaking mmap calls that require fd=-1.
+
+- Fixed emit_mov_r64_mem and emit_mov_mem_r64 to emit a SIB byte when the base register is RSP (register 4). In x86-64, any ModRM with rm=100 (RSP/R12) requires a SIB byte — without it, the CPU misinterprets the displacement byte as a SIB byte, causing incorrect memory accesses. This was causing segfaults in cg_str_concat which uses RSP-relative addressing for stack values.
+
+- Added R8-R15 register definitions to the self-host codegen (previously only RAX-RDI were defined).
+
+- Added type tracking system to the Ctx struct:
+  - var_types: maps variable names → type strings ("str", "int", "bool")
+  - fn_ret_types: maps function names → return type strings
+  - Types are tracked in cg_stmt's let_stmt handler based on the initializer expression type
+  - Function return types are pre-scanned from fn_decl nodes before compilation
+  - Function parameter types are set in cg_function from param.extra (the type annotation)
+
+- Updated cg_expr's string_lit handler to add the string to the data section and record a LEA fixup. Previously, string literals in non-print contexts (like `let s = "hello"`) just emitted LEA with displacement 0, producing invalid pointers.
+
+- Added cg_print_string_lit and cg_print_string_val helper functions:
+  - cg_print_string_lit: stores string in data section, emits write syscall with fixup
+  - cg_print_string_val: takes a string pointer in RAX, loads length from [RAX], data from [RAX+8], emits write syscall
+
+- Updated cg_call's print handler to dispatch based on argument type:
+  - string_lit → cg_print_string_lit
+  - int_lit → load value, cg_print_int
+  - bool_true/bool_false → print "true"/"false"
+  - ident → check var_types, dispatch to string/bool/int print
+  - Other expressions → cg_print_int (default)
+
+- Added string concatenation support:
+  - cg_is_string_expr: recursively determines if an expression produces a string (handles string_lit, ident with str type, call to str-returning function, and nested binary + with string operands)
+  - cg_str_concat: emits inline mmap + memcpy to concatenate two length-prefixed strings. Uses REP MOVSB for efficient copying. Returns a new length-prefixed string.
+  - In cg_binary, the `+` operator checks if both operands are strings (via cg_is_string_expr) and dispatches to cg_str_concat instead of integer addition.
+  - The let_stmt handler tracks the result type of string concatenation for subsequent print dispatch.
+
+- All features verified working:
+  - String variable print: `let s = "hello"; print(s)` → "hello" ✓
+  - String concatenation: `"hello" + " world"` → "hello world" ✓
+  - Triple concatenation: `"Hello, " + name + "!"` → "Hello, World!" ✓
+  - String parameters: `fn greet(name str) str { return "Hello, " + name + "!" }` ✓
+  - Function return type tracking: `let g = greet("World"); print(g)` → "Hello, World!" ✓
+  - Boolean print: `print(true)` → "true", `print(false)` → "false" ✓
+  - Bitwise ops, logical ops, break/continue, recursion — all still work ✓
+
+- Self-compilation fixpoint MAINTAINED:
+  - Source: 124,731 bytes
+  - Output: 93KB binary, 143 functions, 8.5KB code, 7.5KB data
+  - Deterministic: MD5 cb1fcda98574e3c2cbb531a228356cb0 (byte-identical across runs)
+  - All 5 built-in tests pass
+  - All 240 Go tests pass
+
+Stage Summary:
+- The self-host compiler now supports: if/but/else, while, break/continue, function calls, recursion, all arithmetic/comparison/bitwise/logical operators, boolean literals, string literals, string variables, string concatenation (including nested), string parameters, function return type tracking, and type-aware print dispatch.
+- Three critical bugs were fixed: code_u64 negative value encoding, missing SIB byte for RSP-relative addressing, and string_lit not adding data to the data section.
+- Self-compilation fixpoint is maintained and verified deterministic.
+- Next: add for-in range loops, struct/table support, and match statements to cover more of the Go test suite.
