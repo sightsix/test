@@ -28,9 +28,14 @@ struct Ctx
     mut next_slot int
     mut string_count int
     mut fixup_count int
+    mut fn_table table
+    mut fn_count int
+    mut call_fixups table
+    mut call_fixup_count int
+    mut is_main bool
 
 fn ctx_new() Ctx
-    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0, fixup_count: 0}
+    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0, fixup_count: 0, fn_table: {}, fn_count: 0, call_fixups: {}, call_fixup_count: 0, is_main: false}
     return ctx
 
 // ---------------------------------------------------------------------------
@@ -604,32 +609,51 @@ fn cg_call(ctx Ctx, e Node)
         if args.len() > 0
             let arg = args[0]
             if arg.kind == "string_lit"
-                // Add string to data section, record its data offset
                 let data_off = ctx.data_len
                 cg_add_string(ctx, arg.sval)
-                // Emit LEA RSI, [rip + placeholder] and record fixup
                 let lea_pos = ctx.code_len
-                emit_lea_rip(ctx, RSI, 0)  // placeholder, will be fixed up
+                emit_lea_rip(ctx, RSI, 0)
                 cg_add_fixup(ctx, lea_pos, data_off + 8)
-                // write(1, rsi, len)
-                emit_mov_r64_imm64(ctx, RAX, 1)   // SYS_write
-                emit_mov_r64_imm64(ctx, RDI, 1)   // stdout
+                emit_mov_r64_imm64(ctx, RAX, 1)
+                emit_mov_r64_imm64(ctx, RDI, 1)
                 emit_mov_r64_imm64(ctx, RDX, arg.sval.len())
                 emit_syscall(ctx)
                 return
-            // For integer expressions: convert to string and write.
-            // We use a runtime helper that converts RAX to a string
-            // and writes it to stdout.
             cg_expr(ctx, arg)
-            // RAX = integer value (untagged, raw int)
-            // Convert to string using inline code:
-            //   1. Handle negative: if RAX < 0, print '-' and negate
-            //   2. Divide by 10 repeatedly, pushing digits onto stack
-            //   3. Pop and write each digit
             cg_print_int(ctx)
             return
         return
-    emit_nop(ctx)
+    // User-defined function call
+    // Evaluate arguments and push them on the stack (right to left)
+    let args = e.list
+    let mut ai = args.len() - 1
+    while ai >= 0
+        cg_expr(ctx, args[ai])
+        emit_push_r64(ctx, RAX)
+        ai = ai - 1
+    // Emit CALL with placeholder, record fixup
+    code_byte(ctx, 0xE8)  // CALL rel32
+    let call_pos = ctx.code_len
+    code_u32(ctx, 0)  // placeholder
+    // Record the call fixup: (call_pos, fn_name)
+    let idx = ctx.call_fixup_count
+    ctx.call_fixups[idx * 2] = call_pos
+    ctx.call_fixups[idx * 2 + 1] = fn_name
+    ctx.call_fixup_count = idx + 1
+    // Clean up stack arguments (add RSP, n*8)
+    let nargs = args.len()
+    if nargs > 0
+        emit_add_r64_r64(ctx, RSP, RAX)  // placeholder, fix below
+        // Actually we need ADD RSP, imm32. Let me use the proper encoding.
+        // But we already emitted ADD RAX, RSP which is wrong.
+        // Let me fix: undo the last instruction and emit ADD RSP, imm32
+        ctx.code_len = ctx.code_len - 3  // undo ADD RAX, RSP (REX.W 01 C0 = 3 bytes)
+        emit_rex(ctx, true, false, false)
+        code_byte(ctx, 0x81)
+        code_byte(ctx, 0xC4)  // mod=11, reg=0, rm=RSP
+        code_u32(ctx, nargs * 8)
+    // Return value is in RAX
+    return
 
 // Print the integer in RAX to stdout.
 // Uses the stack as a temporary buffer for digit characters.
@@ -730,9 +754,14 @@ fn cg_stmt(ctx Ctx, s Node)
         if s.a.has(0)
             let va = s.a
             cg_expr(ctx, va[0])
-        emit_mov_r64_r64(ctx, RDI, RAX)
-        emit_mov_r64_imm64(ctx, RAX, 60)
-        emit_syscall(ctx)
+        if ctx.is_main
+            emit_mov_r64_r64(ctx, RDI, RAX)
+            emit_mov_r64_imm64(ctx, RAX, 60)
+            emit_syscall(ctx)
+        else
+            emit_mov_r64_r64(ctx, RSP, RBP)
+            emit_pop_r64(ctx, RBP)
+            code_byte(ctx, 0xC3)  // RET
         return
     if s.kind == "expr_stmt"
         let ea = s.a
@@ -857,30 +886,67 @@ fn cg_while(ctx Ctx, s Node)
     ctx.code_data[jz_pos + 2] = (((jz_disp / 65536) % 256) + 256) % 256
     ctx.code_data[jz_pos + 3] = (((jz_disp / 16777216) % 256) + 256) % 256
 
-fn cg_function(ctx Ctx, fn_decl Node)
+fn cg_function(ctx Ctx, fn_decl Node, is_main bool)
+    // Record function start offset
+    let fn_start = ctx.code_len
+    let fn_name = fn_decl.sval
+    ctx.fn_table[fn_name] = fn_start
+    ctx.fn_count = ctx.fn_count + 1
+    
+    // Reset var_slots for this function's scope
+    ctx.var_slots = {}
+    ctx.next_slot = -8
+    
+    // Prologue
     let prologue_start = ctx.code_len
     emit_push_r64(ctx, RBP)
     emit_mov_rbp_rsp(ctx)
-    emit_sub_rsp_imm32(ctx, 0)
+    emit_sub_rsp_imm32(ctx, 0)  // placeholder, fixup later
     
+    // Bind parameters: args are on stack at [RBP+16], [RBP+24], ...
+    let params = fn_decl.a
+    let mut pi = 0
+    while pi < params.len()
+        let param = params[pi]
+        // Parameter is at [RBP + 16 + pi*8] (above return address and saved RBP)
+        let param_stack_offset = 16 + pi * 8
+        // Allocate a local slot and copy the parameter there
+        let local_offset = cg_get_var_offset(ctx, param.sval)
+        emit_mov_r64_mem(ctx, RAX, RBP, param_stack_offset)
+        emit_mov_mem_r64(ctx, RBP, local_offset, RAX)
+        pi = pi + 1
+    
+    ctx.is_main = is_main
+    
+    // Generate body
     let body = fn_decl.list
     let mut i = 0
     while i < body.len()
         cg_stmt(ctx, body[i])
         i = i + 1
     
-    emit_mov_r64_imm64(ctx, RAX, 0)
-    emit_mov_r64_r64(ctx, RDI, RAX)
-    emit_mov_r64_imm64(ctx, RAX, 60)
-    emit_syscall(ctx)
+    // Epilogue
+    if is_main
+        // Main: exit syscall (return value in RAX)
+        emit_mov_r64_imm64(ctx, RAX, 0)
+        emit_mov_r64_r64(ctx, RDI, RAX)
+        emit_mov_r64_imm64(ctx, RAX, 60)
+        emit_syscall(ctx)
+    else
+        // Non-main: MOV RAX, 0 (default return); MOV RSP,RBP; POP RBP; RET
+        emit_mov_r64_imm64(ctx, RAX, 0)
+        emit_mov_r64_r64(ctx, RSP, RBP)
+        emit_pop_r64(ctx, RBP)
+        code_byte(ctx, 0xC3)  // RET
     
+    // Fixup frame size
     let frame_size = 0 - ctx.next_slot - 8
     if frame_size > 0
         let imm_offset = prologue_start + 7
-        ctx.code_data[imm_offset] = frame_size % 256
-        ctx.code_data[imm_offset + 1] = (frame_size / 256) % 256
-        ctx.code_data[imm_offset + 2] = (frame_size / 65536) % 256
-        ctx.code_data[imm_offset + 3] = (frame_size / 16777216) % 256
+        ctx.code_data[imm_offset] = ((frame_size % 256) + 256) % 256
+        ctx.code_data[imm_offset + 1] = (((frame_size / 256) % 256) + 256) % 256
+        ctx.code_data[imm_offset + 2] = (((frame_size / 65536) % 256) + 256) % 256
+        ctx.code_data[imm_offset + 3] = (((frame_size / 16777216) % 256) + 256) % 256
 
 // ---------------------------------------------------------------------------
 // Section 7: Compile a Yilt program
@@ -895,6 +961,9 @@ fn compile_program(src str, output_path str) int
         return 1
     
     let decls = result.decls
+    let ctx = ctx_new()
+    
+    // Pass 1: Compile main first (entry point = start of code section)
     let mut main_fn = n_kind("empty")
     let mut i = 0
     while i < decls.len()
@@ -908,9 +977,33 @@ fn compile_program(src str, output_path str) int
         print("No main function found")
         return 1
     
-    let ctx = ctx_new()
-    cg_function(ctx, main_fn)
+    cg_function(ctx, main_fn, true)
+    
+    // Pass 2: Compile all other functions (main can call them via forward refs)
+    i = 0
+    while i < decls.len()
+        let d = decls[i]
+        if d.kind == "fn_decl"
+            if d.sval != "main"
+                cg_function(ctx, d, false)
+        i = i + 1
+    
+    // Apply string LEA fixups
     cg_apply_fixups(ctx)
+    
+    // Apply call fixups: patch CALL displacements
+    let mut ci = 0
+    while ci < ctx.call_fixup_count
+        let call_pos = ctx.call_fixups[ci * 2]
+        let fn_name = ctx.call_fixups[ci * 2 + 1]
+        if ctx.fn_table.has(fn_name)
+            let fn_start = ctx.fn_table[fn_name]
+            let disp = fn_start - (call_pos + 4)
+            ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
+            ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
+            ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
+            ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
+        ci = ci + 1
     
     let fd = sys.open(output_path, 577, 511)
     if fd < 0
@@ -925,6 +1018,8 @@ fn compile_program(src str, output_path str) int
     print(ctx.code_len)
     print(" data=")
     print(ctx.data_len)
+    print(" fns=")
+    print(ctx.fn_count)
     print(")")
     return 0
 
@@ -960,7 +1055,7 @@ fn main() int
     print("=== Yilt Self-Host Stage 5: Native Codegen ===")
     print("")
     
-    let src = "fn main() int\n    let x = 10\n    if x > 5\n        print(\"big\\n\")\n    else\n        print(\"small\\n\")\n    let mut i = 0\n    let mut sum = 0\n    while i < 5\n        sum = sum + i\n        i = i + 1\n    print(\"sum=\")\n    return sum\n"
+    let src = "fn add(a int, b int) int\n    return a + b\n\nfn main() int\n    let x = add(3, 4)\n    print(x)\n    return x\n"
     
     print("Source:")
     print(src)
