@@ -818,3 +818,41 @@ Stage Summary:
 - True multi-generation fixpoint verified
 - 157 functions in the self-host compiler
 - The Yilt self-hosting bootstrap is FULLY RESTORED after the truncation incident
+
+---
+Task ID: 40-string-equality-and-audit
+Agent: main (Super Z)
+Task: Add proper string equality comparison and audit for multi-target support.
+
+Work Log:
+- Added cg_str_equal function: compares two strings by content (not pointer identity)
+  - Compares lengths first (fast path for unequal-length strings)
+  - Byte-by-byte comparison using MOVZX for zero-extension
+  - Returns 1 if equal, 0 if not
+  - Uses local vars for both string pointers to avoid register clobbering
+- Updated cg_binary for "==" and "!=" to dispatch to cg_str_equal when both
+  operands are strings (detected via cg_is_string_expr)
+- Verified: "hello" == "hello" → returns 1 ✅
+
+- Audited Go implementation for multi-target expansion:
+  - Go yiltc has 5 codegen targets: x86_64, aarch64, rv32, rv64, wasm
+  - Go yiltc has 4 linker formats: elf64, pe64, macho64, wasmobj
+  - Self-host compiler currently only supports x86_64 + ELF64
+  - AArch64 (ARM64) is the most important next target (951 lines in Go)
+
+- Multi-target architecture plan:
+  1. Add target field to Ctx struct (0=x86_64, 1=aarch64, 2=rv64, 3=wasm)
+  2. Add target dispatch in all emit_* functions
+  3. Add AArch64 instruction encoders (fixed 4-byte encoding, load/store arch)
+  4. Add AArch64 ELF64 binary format (same ELF, machine type = 183)
+  5. Add target selection in compile_program
+  6. Then RISC-V and WASM
+
+- Test results: 79/79 pass (100%) ✅
+- True fixpoint: gen3 == gen4 ✅
+- 158 functions in the self-host compiler
+
+Stage Summary:
+- String equality now works correctly (content comparison, not pointer)
+- Multi-target plan established (AArch64 first, then RISC-V, then WASM)
+- All 79 tests pass, true fixpoint verified

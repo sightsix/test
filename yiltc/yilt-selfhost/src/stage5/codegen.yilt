@@ -648,10 +648,22 @@ fn cg_binary(ctx Ctx, e Node)
         code_byte(ctx, 0xF8)  // SAR RAX, CL (arithmetic shift)
         return
     if op == "=="
+        if cg_is_string_expr(ctx, la[0]) and cg_is_string_expr(ctx, rb[0])
+            cg_str_equal(ctx)
+            return
         emit_cmp_r64_r64(ctx, RBX, RAX)
         emit_setcc(ctx, 4, RAX)
         return
     if op == "!="
+        if cg_is_string_expr(ctx, la[0]) and cg_is_string_expr(ctx, rb[0])
+            cg_str_equal(ctx)
+            code_byte(ctx, 0x48)
+            code_byte(ctx, 0x31)
+            code_byte(ctx, 0xF0)
+            code_byte(ctx, 0x83)
+            code_byte(ctx, 0xF0)
+            code_byte(ctx, 0x01)
+            return
         emit_cmp_r64_r64(ctx, RBX, RAX)
         emit_setcc(ctx, 5, RAX)
         return
@@ -2152,6 +2164,104 @@ fn cg_if_expr(ctx Ctx, e Node)
     ctx.code_data[jmp_pos + 1] = (((end_disp / 256) % 256) + 256) % 256
     ctx.code_data[jmp_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
     ctx.code_data[jmp_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
+
+// cg_str_equal: compare two strings by content. RBX = left ptr, RAX = right ptr.
+// Returns 1 in RAX if equal, 0 if not.
+fn cg_str_equal(ctx Ctx)
+    // RBX = left string ptr, RAX = right string ptr
+    // Save both in local vars
+    let left_off = cg_get_var_offset(ctx, "__eq_left__")
+    emit_mov_mem_r64(ctx, RBP, left_off, RBX)
+    let right_off = cg_get_var_offset(ctx, "__eq_right__")
+    emit_mov_mem_r64(ctx, RBP, right_off, RAX)
+    // Compare lengths first: [left] vs [right]
+    emit_mov_r64_mem(ctx, RBX, RBP, left_off)
+    emit_mov_r64_mem(ctx, RBX, RBX, 0)  // RBX = left.len
+    emit_mov_r64_mem(ctx, RAX, RBP, right_off)
+    emit_mov_r64_mem(ctx, RAX, RAX, 0)  // RAX = right.len
+    emit_cmp_r64_r64(ctx, RBX, RAX)
+    // JNE not_equal
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x85)
+    let ne_pos = ctx.code_len
+    code_u32(ctx, 0)
+    // Lengths match — compare bytes
+    // R8 = 0 (index)
+    emit_mov_r64_imm64(ctx, R8, 0)
+    let cmp_loop = ctx.code_len
+    // if R8 >= left.len, equal!
+    emit_cmp_r64_r64(ctx, R8, RBX)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x8D)
+    let eq_pos = ctx.code_len
+    code_u32(ctx, 0)
+    // Load left[8+R8]
+    emit_mov_r64_mem(ctx, RAX, RBP, left_off)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x08)  // ADD RAX, 8
+    emit_add_r64_r64(ctx, RAX, R8)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0xB6)
+    code_byte(ctx, 0x00)  // MOVZX RAX, byte [RAX]
+    emit_mov_r64_r64(ctx, R9, RAX)  // save left byte
+    // Load right[8+R8]
+    emit_mov_r64_mem(ctx, RAX, RBP, right_off)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x08)
+    emit_add_r64_r64(ctx, RAX, R8)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0xB6)
+    code_byte(ctx, 0x00)
+    emit_cmp_r64_r64(ctx, R9, RAX)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x85)
+    let ne2_pos = ctx.code_len
+    code_u32(ctx, 0)
+    // R8++
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x01)
+    code_byte(ctx, 0xE9)
+    let cl_back = cmp_loop - (ctx.code_len + 4)
+    code_u32(ctx, cl_back)
+    // equal: RAX = 1
+    let eq_target = ctx.code_len
+    let eq_disp = eq_target - (eq_pos + 4)
+    ctx.code_data[eq_pos] = ((eq_disp % 256) + 256) % 256
+    ctx.code_data[eq_pos + 1] = (((eq_disp / 256) % 256) + 256) % 256
+    ctx.code_data[eq_pos + 2] = (((eq_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[eq_pos + 3] = (((eq_disp / 16777216) % 256) + 256) % 256
+    emit_mov_r64_imm64(ctx, RAX, 1)
+    code_byte(ctx, 0xE9)
+    let end_pos = ctx.code_len
+    code_u32(ctx, 0)
+    // not_equal: RAX = 0
+    let ne_target = ctx.code_len
+    let ne_disp = ne_target - (ne_pos + 4)
+    ctx.code_data[ne_pos] = ((ne_disp % 256) + 256) % 256
+    ctx.code_data[ne_pos + 1] = (((ne_disp / 256) % 256) + 256) % 256
+    ctx.code_data[ne_pos + 2] = (((ne_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[ne_pos + 3] = (((ne_disp / 16777216) % 256) + 256) % 256
+    let ne2_disp = ne_target - (ne2_pos + 4)
+    ctx.code_data[ne2_pos] = ((ne2_disp % 256) + 256) % 256
+    ctx.code_data[ne2_pos + 1] = (((ne2_disp / 256) % 256) + 256) % 256
+    ctx.code_data[ne2_pos + 2] = (((ne2_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[ne2_pos + 3] = (((ne2_disp / 16777216) % 256) + 256) % 256
+    emit_mov_r64_imm64(ctx, RAX, 0)
+    // end:
+    let end_target = ctx.code_len
+    let end_disp = end_target - (end_pos + 4)
+    ctx.code_data[end_pos] = ((end_disp % 256) + 256) % 256
+    ctx.code_data[end_pos + 1] = (((end_disp / 256) % 256) + 256) % 256
+    ctx.code_data[end_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[end_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
 
 // cg_int_to_str: to_str for integers (stub — returns "0")
 fn cg_int_to_str(ctx Ctx)
