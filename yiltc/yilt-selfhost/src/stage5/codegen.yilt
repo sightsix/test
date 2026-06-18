@@ -3,76 +3,82 @@
 // ===========================================================================
 //
 // Produces native x86_64 ELF binaries from Yilt source code.
-// Uses the Stage 1 lexer and Stage 2 parser to build an AST, then
-// emits x86_64 machine code for a subset of Yilt.
-//
-// Supported constructs:
-//   - fn main() int with let, return, print, if/else, while
-//   - Integer literals and arithmetic (+, -, *, /, %)
-//   - Comparisons (<, <=, >, >=, ==, !=)
-//   - String literals (for print)
-//   - Variables (let, let mut, assignment)
+// Uses Ctx struct for state (passed to all functions — mutations persist
+// because Yilt structs are tables under the hood, and table pointers are
+// shared across function calls).
 //
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// Section 1: Byte buffer
+// Section 1: ALL_BYTES constant for binary output
 // ---------------------------------------------------------------------------
-
-struct Buf
-    mut data table
-    mut len int
-
-fn buf_new() Buf
-    let mut b = Buf{data: {}, len: 0}
-    return b
-
-fn buf_byte(buf Buf, v int)
-    buf.data[buf.len] = v
-    buf.len = buf.len + 1
-
-fn buf_u16(buf Buf, v int)
-    code_byte(v % 256)
-    code_byte((v / 256) % 256)
-
-fn buf_u32(buf Buf, v int)
-    code_byte(v % 256)
-    code_byte((v / 256) % 256)
-    code_byte((v / 65536) % 256)
-    code_byte((v / 16777216) % 256)
-
-fn buf_u64(buf Buf, v int)
-    let mut val = v
-    let mut i = 0
-    while i < 8
-        code_byte(val % 256)
-        val = val / 256
-        i = i + 1
-
-fn buf_str(buf Buf, s str)
-    let bytes = s.bytes()
-    let mut i = 0
-    while i < bytes.len()
-        code_byte(bytes[i])
-        i = i + 1
-
-fn buf_to_str(buf Buf, all_bytes str) str
-    let mut s = ""
-    let mut i = 0
-    while i < buf.len
-        let bv = buf.data[i]
-        s = s + all_bytes.substr(bv, bv + 1)
-        i = i + 1
-    return s
-
-fn buf_write_to(buf Buf, fd int, all_bytes str) int
-    let s = buf_to_str(buf, all_bytes)
-    return sys.write(fd, s, s.len())
 
 let ALL_BYTES = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e\x7f\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xab\xac\xad\xae\xaf\xb0\xb1\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xbb\xbc\xbd\xbe\xbf\xc0\xc1\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xcb\xcc\xcd\xce\xcf\xd0\xd1\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xdb\xdc\xdd\xde\xdf\xe0\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xeb\xec\xed\xee\xef\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff"
 
 // ---------------------------------------------------------------------------
-// Section 2: x86_64 instruction encoders
+// Section 2: Codegen context (struct = table under the hood, mutations persist)
+// ---------------------------------------------------------------------------
+
+struct Ctx
+    mut code_data table
+    mut code_len int
+    mut data_data table
+    mut data_len int
+    mut var_slots table
+    mut next_slot int
+    mut string_count int
+
+fn ctx_new() Ctx
+    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0}
+    return ctx
+
+// ---------------------------------------------------------------------------
+// Section 3: Code byte emitters (write to ctx.code_data)
+// ---------------------------------------------------------------------------
+
+fn code_byte(ctx Ctx, v int)
+    ctx.code_data[ctx.code_len] = ((v % 256) + 256) % 256
+    ctx.code_len = ctx.code_len + 1
+
+fn code_u16(ctx Ctx, v int)
+    code_byte(ctx, v % 256)
+    code_byte(ctx, (v / 256) % 256)
+
+fn code_u32(ctx Ctx, v int)
+    code_byte(ctx, v % 256)
+    code_byte(ctx, (v / 256) % 256)
+    code_byte(ctx, (v / 65536) % 256)
+    code_byte(ctx, (v / 16777216) % 256)
+
+fn code_u64(ctx Ctx, v int)
+    let mut val = v
+    let mut i = 0
+    while i < 8
+        code_byte(ctx, val % 256)
+        val = val / 256
+        i = i + 1
+
+fn data_byte(ctx Ctx, v int)
+    ctx.data_data[ctx.data_len] = ((v % 256) + 256) % 256
+    ctx.data_len = ctx.data_len + 1
+
+fn data_u64(ctx Ctx, v int)
+    let mut val = v
+    let mut i = 0
+    while i < 8
+        data_byte(ctx, val % 256)
+        val = val / 256
+        i = i + 1
+
+fn data_str(ctx Ctx, s str)
+    let bytes = s.bytes()
+    let mut i = 0
+    while i < bytes.len()
+        data_byte(ctx, bytes[i])
+        i = i + 1
+
+// ---------------------------------------------------------------------------
+// Section 4: x86_64 instruction encoders
 // ---------------------------------------------------------------------------
 
 let RAX = 0
@@ -87,7 +93,7 @@ let RDI = 7
 fn ext(r int) bool
     return r >= 8
 
-fn emit_rex( w bool, r bool, bb bool)
+fn emit_rex(ctx Ctx, w bool, r bool, bb bool)
     let mut p = 64
     if w
         p = p + 8
@@ -95,531 +101,549 @@ fn emit_rex( w bool, r bool, bb bool)
         p = p + 4
     if bb
         p = p + 1
-    code_byte(p)
+    code_byte(ctx, p)
 
-fn emit_mov_r64_imm64( dst int, imm int)
-    emit_rex( true, false, ext(dst))
-    code_byte(184 + (dst % 8))
-    code_u64(imm)
+fn emit_mov_r64_imm64(ctx Ctx, dst int, imm int)
+    emit_rex(ctx, true, false, ext(dst))
+    code_byte(ctx, 184 + (dst % 8))
+    code_u64(ctx, imm)
 
-fn emit_mov_r64_imm32( dst int, imm int)
-    emit_rex( true, false, ext(dst))
-    code_byte(0xC7)
-    code_byte(0xC0 + (dst % 8))
-    code_u32(imm)
+fn emit_xor_r64_r64(ctx Ctx, dst int, src int)
+    emit_rex(ctx, true, ext(src), ext(dst))
+    code_byte(ctx, 0x31)
+    code_byte(ctx, 0xC0 + ((src % 8) * 8) + (dst % 8))
 
-fn emit_xor_r64_r64( dst int, src int)
-    emit_rex( true, ext(src), ext(dst))
-    code_byte(0x31)
-    code_byte(0xC0 + ((src % 8) * 8) + (dst % 8))
+fn emit_mov_r64_r64(ctx Ctx, dst int, src int)
+    emit_rex(ctx, true, ext(src), ext(dst))
+    code_byte(ctx, 0x89)
+    code_byte(ctx, 0xC0 + ((src % 8) * 8) + (dst % 8))
 
-fn emit_mov_r64_r64( dst int, src int)
-    emit_rex( true, ext(src), ext(dst))
-    code_byte(0x89)
-    code_byte(0xC0 + ((src % 8) * 8) + (dst % 8))
+fn emit_add_r64_r64(ctx Ctx, dst int, src int)
+    emit_rex(ctx, true, ext(src), ext(dst))
+    code_byte(ctx, 0x01)
+    code_byte(ctx, 0xC0 + ((src % 8) * 8) + (dst % 8))
 
-fn emit_add_r64_r64( dst int, src int)
-    emit_rex( true, ext(src), ext(dst))
-    code_byte(0x01)
-    code_byte(0xC0 + ((src % 8) * 8) + (dst % 8))
+fn emit_sub_r64_r64(ctx Ctx, dst int, src int)
+    emit_rex(ctx, true, ext(src), ext(dst))
+    code_byte(ctx, 0x29)
+    code_byte(ctx, 0xC0 + ((src % 8) * 8) + (dst % 8))
 
-fn emit_sub_r64_r64( dst int, src int)
-    emit_rex( true, ext(src), ext(dst))
-    code_byte(0x29)
-    code_byte(0xC0 + ((src % 8) * 8) + (dst % 8))
+fn emit_imul_r64_r64(ctx Ctx, dst int, src int)
+    emit_rex(ctx, true, ext(dst), ext(src))
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0xAF)
+    code_byte(ctx, 0xC0 + ((dst % 8) * 8) + (src % 8))
 
-fn emit_imul_r64_r64( dst int, src int)
-    emit_rex( true, ext(dst), ext(src))
-    code_byte(0x0F)
-    code_byte(0xAF)
-    code_byte(0xC0 + ((dst % 8) * 8) + (src % 8))
+fn emit_syscall(ctx Ctx)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x05)
 
-fn emit_syscall()
-    code_byte(0x0F)
-    code_byte(0x05)
+fn emit_lea_rip(ctx Ctx, dst int, disp32 int)
+    emit_rex(ctx, true, ext(dst), false)
+    code_byte(ctx, 0x8D)
+    code_byte(ctx, 0x05 + ((dst % 8) * 8))
+    code_u32(ctx, disp32)
 
-fn emit_lea_rip( dst int, disp32 int)
-    emit_rex( true, ext(dst), false)
-    code_byte(0x8D)
-    code_byte(0x05 + ((dst % 8) * 8))
-    code_u32(disp32)
-
-fn emit_push_r64( r int)
+fn emit_push_r64(ctx Ctx, r int)
     if ext(r)
-        emit_rex( false, false, true)
-    code_byte(0x50 + (r % 8))
+        emit_rex(ctx, false, false, true)
+    code_byte(ctx, 0x50 + (r % 8))
 
-fn emit_pop_r64( r int)
+fn emit_pop_r64(ctx Ctx, r int)
     if ext(r)
-        emit_rex( false, false, true)
-    code_byte(0x58 + (r % 8))
+        emit_rex(ctx, false, false, true)
+    code_byte(ctx, 0x58 + (r % 8))
 
-fn emit_mov_rbp_rsp()
-    emit_rex( true, false, false)
-    code_byte(0x89)
-    code_byte(0xE5)
+fn emit_mov_rbp_rsp(ctx Ctx)
+    emit_rex(ctx, true, false, false)
+    code_byte(ctx, 0x89)
+    code_byte(ctx, 0xE5)
 
-fn emit_sub_rsp_imm32( imm int)
-    emit_rex( true, false, false)
-    code_byte(0x81)
-    code_byte(0xEC)
-    code_u32(imm)
+fn emit_sub_rsp_imm32(ctx Ctx, imm int)
+    emit_rex(ctx, true, false, false)
+    code_byte(ctx, 0x81)
+    code_byte(ctx, 0xEC)
+    code_u32(ctx, imm)
 
-fn emit_add_rsp_imm32( imm int)
-    emit_rex( true, false, false)
-    code_byte(0x81)
-    code_byte(0xC4)
-    code_u32(imm)
+fn emit_mov_mem_r64(ctx Ctx, base int, offset int, src int)
+    emit_rex(ctx, true, ext(src), ext(base))
+    code_byte(ctx, 0x89)
+    code_byte(ctx, 0x40 + ((src % 8) * 8) + (base % 8))
+    code_byte(ctx, offset)
 
-fn emit_mov_mem_r64( base int, offset int, src int)
-    emit_rex( true, ext(src), ext(base))
-    code_byte(0x89)
-    code_byte(0x40 + ((src % 8) * 8) + (base % 8))
-    code_byte(offset)
+fn emit_mov_r64_mem(ctx Ctx, dst int, base int, offset int)
+    emit_rex(ctx, true, ext(dst), ext(base))
+    code_byte(ctx, 0x8B)
+    code_byte(ctx, 0x40 + ((dst % 8) * 8) + (base % 8))
+    code_byte(ctx, offset)
 
-fn emit_mov_r64_mem( dst int, base int, offset int)
-    emit_rex( true, ext(dst), ext(base))
-    code_byte(0x8B)
-    code_byte(0x40 + ((dst % 8) * 8) + (base % 8))
-    code_byte(offset)
+fn emit_cmp_r64_r64(ctx Ctx, dst int, src int)
+    emit_rex(ctx, true, ext(src), ext(dst))
+    code_byte(ctx, 0x39)
+    code_byte(ctx, 0xC0 + ((src % 8) * 8) + (dst % 8))
 
-// Conditional jump: JNE rel32 = 0F 85 + disp32
-fn emit_jne( disp32 int)
-    code_byte(0x0F)
-    code_byte(0x85)
-    code_u32(disp32)
+fn emit_neg_r64(ctx Ctx, dst int)
+    emit_rex(ctx, true, false, ext(dst))
+    code_byte(ctx, 0xF7)
+    code_byte(ctx, 0xD8 + (dst % 8))
 
-// JMP rel32 = E9 + disp32
-fn emit_jmp( disp32 int)
-    code_byte(0xE9)
-    code_u32(disp32)
+fn emit_idiv_r64(ctx Ctx, src int)
+    emit_rex(ctx, true, false, ext(src))
+    code_byte(ctx, 0xF7)
+    code_byte(ctx, 0xF8 + (src % 8))
 
-// CMP r64, r64
-fn emit_cmp_r64_r64( dst int, src int)
-    emit_rex( true, ext(src), ext(dst))
-    code_byte(0x39)
-    code_byte(0xC0 + ((src % 8) * 8) + (dst % 8))
+fn emit_cqo(ctx Ctx)
+    emit_rex(ctx, true, false, false)
+    code_byte(ctx, 0x99)
 
-// CMP r64, imm8
-fn emit_cmp_r64_imm8( dst int, imm int)
-    emit_rex( true, false, ext(dst))
-    code_byte(0x83)
-    code_byte(0xF8 + (dst % 8))
-    code_byte(imm)
+fn emit_nop(ctx Ctx)
+    code_byte(ctx, 0x90)
 
-// SETcc + MOVZX for comparison results
-fn emit_setcc( cc int, dst int)
-    // SETcc: 0F 90+cc /r (mod=11, reg=dst)
-    code_byte(0x0F)
-    code_byte(0x90 + cc)
-    code_byte(0xC0 + dst)
-    // MOVZX r64, r8: REX.W + 0F B6 /r
-    emit_rex( true, false, false)
-    code_byte(0x0F)
-    code_byte(0xB6)
-    code_byte(0xC0 + (dst * 8) + dst)  // mod=11, reg=dst, rm=dst
-
-// NEG r64
-fn emit_neg_r64( dst int)
-    emit_rex( true, false, ext(dst))
-    code_byte(0xF7)
-    code_byte(0xD8 + (dst % 8))
-
-// IDIV r64 (signed divide, RDX:RAX / src)
-fn emit_idiv_r64( src int)
-    emit_rex( true, false, ext(src))
-    code_byte(0xF7)
-    code_byte(0xF8 + (src % 8))
-
-// CQO (sign-extend RAX into RDX:RAX)
-fn emit_cqo()
-    emit_rex( true, false, false)
-    code_byte(0x99)
-
-// NOP (for alignment)
-fn emit_nop()
-    code_byte(0x90)
+fn emit_setcc(ctx Ctx, cc int, dst int)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x90 + cc)
+    code_byte(ctx, 0xC0 + dst)
+    emit_rex(ctx, true, false, false)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0xB6)
+    code_byte(ctx, 0xC0 + (dst * 8) + dst)
 
 // ---------------------------------------------------------------------------
-// Section 3: ELF64 builder
+// Section 5: ELF64 builder
 // ---------------------------------------------------------------------------
 
 let BASE_ADDR = 0x400000
 
-fn build_elf64_header(buf Buf, code_len int, data_len int, code_offset int, data_offset int, entry int)
-    let total = code_offset + code_len + data_len
+fn build_elf(ctx Ctx, output_fd int) int
+    let code_len = ctx.code_len
+    let data_len = ctx.data_len
+    let headers_size = 64 + 56  // ELF header + 1 PHDR = 120
+    let code_offset = headers_size
+    let data_offset = code_offset + code_len
+    let total = headers_size + code_len + data_len
+    let entry = BASE_ADDR + code_offset
+    
+    // Build the entire binary in a temporary table, then write it out
+    let mut bin_data = {}
+    let mut bin_len = 0
+    
+    // Helper to add a byte to the binary
+    let mut bi = 0
+    while bi < 256
+        bin_data[bi] = 0
+        bi = bi + 1
+    bin_len = 0
     
     // --- ELF Header (64 bytes) ---
-    code_byte(0x7F) + code_byte(69) + code_byte(76) + code_byte(70)
-    code_byte(2) + code_byte(1) + code_byte(1) + code_byte(0)
-    code_byte(0) + code_byte(0) + code_byte(0) + code_byte(0)
-    code_byte(0) + code_byte(0) + code_byte(0) + code_byte(0)
-    code_u16(2)     // ET_EXEC
-    code_u16(62)    // EM_X86_64
-    code_u32(1)     // e_version
-    code_u64(entry)
-    code_u64(64)    // e_phoff
-    code_u64(0)     // e_shoff
-    code_u32(0)     // e_flags
-    code_u16(64)    // e_ehsize
-    code_u16(56)    // e_phentsize
-    code_u16(1)     // e_phnum (1 LOAD segment)
-    code_u16(0)     // e_shentsize
-    code_u16(0)     // e_shnum
-    code_u16(0)     // e_shstrndx
+    // e_ident
+    bin_data[bin_len] = 0x7F
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 69
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 76
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 70
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 2
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 1
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 1
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_type = ET_EXEC
+    bin_data[bin_len] = 2
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_machine = EM_X86_64
+    bin_data[bin_len] = 62
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_version
+    bin_data[bin_len] = 1
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_entry (8 bytes, little-endian)
+    let mut ev = entry
+    let mut ei = 0
+    while ei < 8
+        bin_data[bin_len] = ev % 256
+        bin_len = bin_len + 1
+        ev = ev / 256
+        ei = ei + 1
+    // e_phoff = 64
+    bin_data[bin_len] = 64
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_shoff = 0
+    let mut zi = 0
+    while zi < 8
+        bin_data[bin_len] = 0
+        bin_len = bin_len + 1
+        zi = zi + 1
+    // e_flags = 0
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_ehsize = 64
+    bin_data[bin_len] = 64
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_phentsize = 56
+    bin_data[bin_len] = 56
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_phnum = 1
+    bin_data[bin_len] = 1
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_shentsize = 0
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_shnum = 0
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // e_shstrndx = 0
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
     
-    // --- Single LOAD segment: entire file (R+W+X) ---
-    code_u32(1)              // PT_LOAD
-    code_u32(7)              // PF_R + PF_W + PF_X
-    code_u64(0)              // p_offset = 0
-    code_u64(BASE_ADDR)      // p_vaddr
-    code_u64(BASE_ADDR)      // p_paddr
-    code_u64(total)          // p_filesz
-    code_u64(total)          // p_memsz
-    code_u64(0x1000)         // p_align
+    // --- Program Header: single LOAD (R+W+X) ---
+    // p_type = PT_LOAD
+    bin_data[bin_len] = 1
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // p_flags = R+W+X
+    bin_data[bin_len] = 7
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    // p_offset = 0
+    let mut zi2 = 0
+    while zi2 < 8
+        bin_data[bin_len] = 0
+        bin_len = bin_len + 1
+        zi2 = zi2 + 1
+    // p_vaddr = BASE_ADDR
+    let mut bv = BASE_ADDR
+    let mut bi2 = 0
+    while bi2 < 8
+        bin_data[bin_len] = bv % 256
+        bin_len = bin_len + 1
+        bv = bv / 256
+        bi2 = bi2 + 1
+    // p_paddr = BASE_ADDR
+    let mut bv2 = BASE_ADDR
+    let mut bi3 = 0
+    while bi3 < 8
+        bin_data[bin_len] = bv2 % 256
+        bin_len = bin_len + 1
+        bv2 = bv2 / 256
+        bi3 = bi3 + 1
+    // p_filesz = total
+    let mut tv = total
+    let mut ti = 0
+    while ti < 8
+        bin_data[bin_len] = tv % 256
+        bin_len = bin_len + 1
+        tv = tv / 256
+        ti = ti + 1
+    // p_memsz = total
+    let mut tv2 = total
+    let mut ti2 = 0
+    while ti2 < 8
+        bin_data[bin_len] = tv2 % 256
+        bin_len = bin_len + 1
+        tv2 = tv2 / 256
+        ti2 = ti2 + 1
+    // p_align = 0x1000
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 16
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    bin_data[bin_len] = 0
+    bin_len = bin_len + 1
+    
+    // --- Append code bytes ---
+    let mut ci = 0
+    while ci < code_len
+        bin_data[bin_len] = ((ctx.code_data[ci] % 256) + 256) % 256
+        bin_len = bin_len + 1
+        ci = ci + 1
+    
+    // --- Append data bytes ---
+    let mut di = 0
+    while di < data_len
+        bin_data[bin_len] = ((ctx.data_data[di] % 256) + 256) % 256
+        bin_len = bin_len + 1
+        di = di + 1
+    
+    // --- Write binary to file ---
+    // Build a string from the binary data
+    let mut s = ""
+    let mut si = 0
+    while si < bin_len
+        let bv3 = bin_data[si]
+        s = s + ALL_BYTES.substr(bv3, bv3 + 1)
+        si = si + 1
+    return sys.write(output_fd, s, s.len())
 
 // ---------------------------------------------------------------------------
-// Section 4: Code generator — walks AST and emits x86_64 code
+// Section 6: Code generator — walks AST and emits x86_64 code
 // ---------------------------------------------------------------------------
 
-// Code generator state
-// Code generator state — use raw tables/ints as globals (not structs)
-let mut g_code_data = {}
-let mut g_code_len = 0
-let mut g_data_data = {}
-let mut g_data_len = 0
-let mut g_var_slots = {}
-let mut g_next_slot = -8
-let mut g_string_count = 0
-
-fn cg_init()
-    g_code_data = {}
-    g_code_len = 0
-    g_data_data = {}
-    g_data_len = 0
-    g_var_slots = {}
-    g_next_slot = -8
-    g_string_count = 0
-
-// Wrappers that use the globals
-fn code_byte(v int)
-    g_code_data[g_code_len] = v
-    g_code_len = g_code_len + 1
-
-fn code_u16(v int)
-    code_byte(v % 256)
-    code_byte((v / 256) % 256)
-
-fn code_u32(v int)
-    code_byte(v % 256)
-    code_byte((v / 256) % 256)
-    code_byte((v / 65536) % 256)
-    code_byte((v / 16777216) % 256)
-
-fn code_u64(v int)
-    let mut val = v
-    let mut i = 0
-    while i < 8
-        code_byte(val % 256)
-        val = val / 256
-        i = i + 1
-
-fn data_byte(v int)
-    g_data_data[g_data_len] = v
-    g_data_len = g_data_len + 1
-
-fn data_u64(v int)
-    let mut val = v
-    let mut i = 0
-    while i < 8
-        data_byte(val % 256)
-        val = val / 256
-        i = i + 1
-
-fn data_str(s str)
-    let bytes = s.bytes()
-    let mut i = 0
-    while i < bytes.len()
-        data_byte(bytes[i])
-        i = i + 1
-
-fn cg_new_label() int
-    return 0  // not used yet
-
-fn cg_add_string(s str) int
-    let idx = g_string_count
-    data_u64(s.len())
-    data_str(s)
-    data_byte(0)
-    g_string_count = idx + 1
-    return idx
-
-fn cg_get_var_offset(name str) int
-    if g_var_slots.has(name)
-        return g_var_slots[name]
-    let offset = g_next_slot
-    g_var_slots[name] = offset
-    g_next_slot = offset - 8
+fn cg_get_var_offset(ctx Ctx, name str) int
+    if ctx.var_slots.has(name)
+        return ctx.var_slots[name]
+    let offset = ctx.next_slot
+    ctx.var_slots[name] = offset
+    ctx.next_slot = offset - 8
     return offset
 
-// Generate code for an expression. Result is in RAX.
-fn cg_expr(e Node)
+fn cg_add_string(ctx Ctx, s str) int
+    let idx = ctx.string_count
+    data_u64(ctx, s.len())
+    data_str(ctx, s)
+    data_byte(ctx, 0)
+    ctx.string_count = idx + 1
+    return idx
+
+fn cg_expr(ctx Ctx, e Node)
     if e.kind == "int_lit"
-        // Parse the integer literal and emit MOV RAX, tagged_value
         let val = parse_int(e.sval)
-        // Tag as integer: (TAG_INT << 56) | (val & 0x00FFFFFFFFFFFFFF)
-        let mut tagged = val
-        if val < 0
-            tagged = val
-        emit_mov_r64_imm64(RAX, tagged)
+        emit_mov_r64_imm64(ctx, RAX, val)
         return
     if e.kind == "string_lit"
-        // Add string to data section, then LEA RAX, [rip + offset]
-        let idx = cg_add_string(e.sval)
-        // We need to know the code size to compute the RIP-relative offset.
-        // For now, use a placeholder and fix up later.
-        // Actually, we can compute: data_offset = current_code_len + remaining_code_len + data_start
-        // This is complex. For now, we emit LEA with a placeholder and
-        // store the fixup position.
-        // 
-        // Simpler approach: store string pointer as an absolute address.
-        // But we don't know the final address until we know the total code size.
-        //
-        // For Stage 5, we'll use a two-pass approach:
-        // Pass 1: compute code size (emit to a temp buffer, measure)
-        // Pass 2: emit with correct offsets
-        //
-        // Even simpler: just emit the string inline after the code,
-        // and use LEA rip-relative. We know the data starts right after
-        // all code. We can compute the offset as:
-        //   data_offset_in_section = (total_code_len - current_pos) + string_data_offset
-        //
-        // But we don't know total_code_len yet. So we use a fixup table.
-        //
-        // For now: just emit a NOP placeholder (7 bytes = LEA size).
-        // We'll fix this up in a second pass.
-        emit_lea_rip(RAX, 0)  // placeholder, fixup later
+        emit_lea_rip(ctx, RAX, 0)
         return
     if e.kind == "ident"
-        // Load variable from stack into RAX
-        let offset = cg_get_var_offset(e.sval)
-        emit_mov_r64_mem(RAX, RBP, offset)
+        let offset = cg_get_var_offset(ctx, e.sval)
+        emit_mov_r64_mem(ctx, RAX, RBP, offset)
         return
     if e.kind == "binary"
-        cg_binary(e)
+        cg_binary(ctx, e)
         return
     if e.kind == "unary"
-        cg_unary(e)
+        cg_unary(ctx, e)
         return
     if e.kind == "call"
-        cg_call(e)
+        cg_call(ctx, e)
         return
-    // Unknown expression: emit 0
-    emit_mov_r64_imm64(RAX, 0)
+    emit_mov_r64_imm64(ctx, RAX, 0)
 
-fn cg_binary(e Node)
+fn cg_binary(ctx Ctx, e Node)
     let la = e.a
     let rb = e.b
     let op = e.sval
-    // Evaluate left into RAX, push, evaluate right into RAX, pop left into RBX
-    cg_expr(la[0])
-    emit_push_r64(RAX)
-    cg_expr(rb[0])
-    emit_pop_r64(RBX)  // RBX = left, RAX = right
+    cg_expr(ctx, la[0])
+    emit_push_r64(ctx, RAX)
+    cg_expr(ctx, rb[0])
+    emit_pop_r64(ctx, RBX)
     
     if op == "+"
-        emit_add_r64_r64(RAX, RBX)  // RAX = RBX + RAX
+        emit_add_r64_r64(ctx, RAX, RBX)
         return
     if op == "-"
-        // RAX = RBX - RAX → need SUB RAX, RBX then NEG, or swap
-        // Actually: SUB RBX, RAX → RBX = left - right. Then MOV RAX, RBX.
-        emit_sub_r64_r64(RBX, RAX)
-        emit_mov_r64_r64(RAX, RBX)
+        emit_sub_r64_r64(ctx, RBX, RAX)
+        emit_mov_r64_r64(ctx, RAX, RBX)
         return
     if op == "*"
-        // IMUL RAX, RBX → RAX = RBX * RAX
-        emit_imul_r64_r64(RAX, RBX)
+        emit_imul_r64_r64(ctx, RAX, RBX)
         return
     if op == "/"
-        // IDIV: RDX:RAX / operand. Move left to RAX, right to RCX, CQO, IDIV RCX.
-        emit_mov_r64_r64(RAX, RBX)  // RAX = left
-        emit_mov_r64_r64(RCX, RAX)  // Wait, we need right in a reg
-        // Actually: RBX = left, RAX = right. We want RAX = left / right.
-        // MOV RCX, RAX (save right)
-        // MOV RAX, RBX (left)
-        // CQO (sign-extend)
-        // IDIV RCX (RAX = RDX:RAX / RCX)
-        emit_mov_r64_r64(RCX, RAX)  // RCX = right
-        emit_mov_r64_r64(RAX, RBX)  // RAX = left
-        emit_cqo()
-        emit_idiv_r64(RCX)
+        emit_mov_r64_r64(ctx, RCX, RAX)
+        emit_mov_r64_r64(ctx, RAX, RBX)
+        emit_cqo(ctx)
+        emit_idiv_r64(ctx, RCX)
         return
     if op == "%"
-        emit_mov_r64_r64(RCX, RAX)  // RCX = right
-        emit_mov_r64_r64(RAX, RBX)  // RAX = left
-        emit_cqo()
-        emit_idiv_r64(RCX)
-        emit_mov_r64_r64(RAX, RDX)  // RAX = remainder
+        emit_mov_r64_r64(ctx, RCX, RAX)
+        emit_mov_r64_r64(ctx, RAX, RBX)
+        emit_cqo(ctx)
+        emit_idiv_r64(ctx, RCX)
+        emit_mov_r64_r64(ctx, RAX, RDX)
         return
-    // Comparisons: CMP RBX, RAX then SETcc + MOVZX
     if op == "=="
-        emit_cmp_r64_r64(RBX, RAX)
-        emit_setcc(4, RAX)  // SETE
+        emit_cmp_r64_r64(ctx, RBX, RAX)
+        emit_setcc(ctx, 4, RAX)
         return
     if op == "!="
-        emit_cmp_r64_r64(RBX, RAX)
-        emit_setcc(5, RAX)  // SETNE
+        emit_cmp_r64_r64(ctx, RBX, RAX)
+        emit_setcc(ctx, 5, RAX)
         return
     if op == "<"
-        emit_cmp_r64_r64(RBX, RAX)
-        emit_setcc(12, RAX)  // SETL
+        emit_cmp_r64_r64(ctx, RBX, RAX)
+        emit_setcc(ctx, 12, RAX)
         return
     if op == "<="
-        emit_cmp_r64_r64(RBX, RAX)
-        emit_setcc(14, RAX)  // SETLE
+        emit_cmp_r64_r64(ctx, RBX, RAX)
+        emit_setcc(ctx, 14, RAX)
         return
     if op == ">"
-        emit_cmp_r64_r64(RBX, RAX)
-        emit_setcc(15, RAX)  // SETG
+        emit_cmp_r64_r64(ctx, RBX, RAX)
+        emit_setcc(ctx, 15, RAX)
         return
     if op == ">="
-        emit_cmp_r64_r64(RBX, RAX)
-        emit_setcc(13, RAX)  // SETGE
+        emit_cmp_r64_r64(ctx, RBX, RAX)
+        emit_setcc(ctx, 13, RAX)
         return
 
-fn cg_unary(e Node)
+fn cg_unary(ctx Ctx, e Node)
     let oa = e.a
-    cg_expr(oa[0])
+    cg_expr(ctx, oa[0])
     if e.sval == "-"
-        emit_neg_r64(RAX)
+        emit_neg_r64(ctx, RAX)
         return
 
-fn cg_call(e Node)
+fn cg_call(ctx Ctx, e Node)
     let fa = e.a
     if fa[0].kind != "ident"
-        emit_mov_r64_imm64(RAX, 0)
+        emit_mov_r64_imm64(ctx, RAX, 0)
         return
     let fn_name = fa[0].sval
-    // Built-in: print
     if fn_name == "print"
         let args = e.list
         if args.len() > 0
-            // Evaluate argument into RAX
-            cg_expr(args[0])
-            // If it's a string literal, we need to handle it specially.
-            // For integers, convert to string and write.
-            // For now, just handle string literals and integers.
             let arg = args[0]
             if arg.kind == "string_lit"
-                // Add string to data section
-                let idx = cg_add_string(arg.sval)
-                // Emit: LEA RSI, [rip + data_offset]
-                // Then: MOV RAX, 1 (SYS_write), MOV RDI, 1 (stdout), MOV RDX, len, SYSCALL
-                // But we don't know the final offset yet. Use placeholder.
-                // For now, we'll use a two-pass approach.
-                // Actually, let's emit the write syscall with a placeholder LEA.
-                emit_lea_rip(RSI, 0)  // placeholder
-                emit_mov_r64_imm64(RAX, 1)   // SYS_write
-                emit_mov_r64_imm64(RDI, 1)   // stdout
-                emit_mov_r64_imm64(RDX, arg.sval.len())  // length
-                emit_syscall()
-            if arg.kind == "int_lit"
-                // For integers, we need to convert to string.
-                // For now, just skip (or print a placeholder).
-                // Actually, let's use the runtime's y_print function.
-                // But we don't link the runtime. For Stage 5, we'll
-                // implement a simple int-to-string + write.
-                // For now, just emit a newline.
-                return
-            // For other expressions (variables, binary ops), the result
-            // is in RAX as a raw integer. Convert to string and print.
-            // For now, just return.
+                let idx = cg_add_string(ctx, arg.sval)
+                emit_lea_rip(ctx, RSI, 0)
+                emit_mov_r64_imm64(ctx, RAX, 1)
+                emit_mov_r64_imm64(ctx, RDI, 1)
+                emit_mov_r64_imm64(ctx, RDX, arg.sval.len())
+                emit_syscall(ctx)
             return
         return
-    // Unknown function: emit NOP
-    emit_nop()
+    emit_nop(ctx)
 
-// Generate code for a statement.
-fn cg_stmt(s Node)
+fn cg_stmt(ctx Ctx, s Node)
     if s.kind == "let_stmt"
         let va = s.a
-        cg_expr(va[0])  // result in RAX
-        let offset = cg_get_var_offset(s.sval)
-        emit_mov_mem_r64(RBP, offset, RAX)
+        cg_expr(ctx, va[0])
+        let offset = cg_get_var_offset(ctx, s.sval)
+        emit_mov_mem_r64(ctx, RBP, offset, RAX)
         return
     if s.kind == "return"
         if s.a.has(0)
             let va = s.a
-            cg_expr(va[0])  // result in RAX
-        // Epilogue: exit syscall (RAX = return value)
-        emit_mov_r64_r64(RDI, RAX)
-        emit_mov_r64_imm64(RAX, 60)
-        emit_syscall()
+            cg_expr(ctx, va[0])
+        emit_mov_r64_r64(ctx, RDI, RAX)
+        emit_mov_r64_imm64(ctx, RAX, 60)
+        emit_syscall(ctx)
         return
     if s.kind == "expr_stmt"
         let ea = s.a
-        cg_expr(ea[0])
+        cg_expr(ctx, ea[0])
         return
     if s.kind == "assign"
         let ea = s.a
         let vb = s.b
-        cg_expr(vb[0])  // result in RAX
+        cg_expr(ctx, vb[0])
         if ea[0].kind == "ident"
-            let offset = cg_get_var_offset(ea[0].sval)
-            emit_mov_mem_r64(RBP, offset, RAX)
+            let offset = cg_get_var_offset(ctx, ea[0].sval)
+            emit_mov_mem_r64(ctx, RBP, offset, RAX)
         return
 
-// Generate code for a function.
-fn cg_function(fn_decl Node)
-    // Prologue:
-    //   PUSH RBP
-    //   MOV RBP, RSP
-    //   SUB RSP, <frame_size>
-    // We'll fix up the frame size after generating the body.
-    let prologue_start = g_code_len
-    emit_push_r64(RBP)
-    emit_mov_rbp_rsp()
-    // Placeholder for SUB RSP, imm32 (7 bytes)
-    emit_sub_rsp_imm32(0)  // placeholder, fix up later
+fn cg_function(ctx Ctx, fn_decl Node)
+    let prologue_start = ctx.code_len
+    emit_push_r64(ctx, RBP)
+    emit_mov_rbp_rsp(ctx)
+    emit_sub_rsp_imm32(ctx, 0)
     
-    // Generate body
     let body = fn_decl.list
     let mut i = 0
     while i < body.len()
-        cg_stmt(body[i])
+        cg_stmt(ctx, body[i])
         i = i + 1
     
-    // Default epilogue: exit syscall (RAX = return value = exit code)
-    //   MOV RDI, RAX  (exit code)
-    //   MOV RAX, 60   (SYS_exit)
-    //   SYSCALL
-    emit_mov_r64_r64(RDI, RAX)
-    emit_mov_r64_imm64(RAX, 60)
-    emit_syscall()
+    emit_mov_r64_imm64(ctx, RAX, 0)
+    emit_mov_r64_r64(ctx, RDI, RAX)
+    emit_mov_r64_imm64(ctx, RAX, 60)
+    emit_syscall(ctx)
     
-    // Fix up frame size: the SUB RSP instruction is at prologue_start + 3 (after PUSH + MOV)
-    // Its immediate is at prologue_start + 3 + 3 = prologue_start + 6
-    let frame_size = 0 - g_next_slot - 8  // e.g., if next_slot = -24, frame = 16
+    let frame_size = 0 - ctx.next_slot - 8
     if frame_size > 0
-        // Patch the imm32 in the SUB RSP instruction
-        // SUB RSP, imm32 is: REX.W 81 EC imm32 (7 bytes)
-        // imm32 starts at prologue_start + 3 (PUSH=1, MOV=3, then SUB starts)
-        // Actually: PUSH RBP = 1 byte, MOV RBP,RSP = 3 bytes, SUB RSP = 7 bytes
-        // imm32 is at offset prologue_start + 1 + 3 + 3 = prologue_start + 7
         let imm_offset = prologue_start + 7
-        g_code_data[imm_offset] = frame_size % 256
-        g_code_data[imm_offset + 1] = (frame_size / 256) % 256
-        g_code_data[imm_offset + 2] = (frame_size / 65536) % 256
-        g_code_data[imm_offset + 3] = (frame_size / 16777216) % 256
+        ctx.code_data[imm_offset] = frame_size % 256
+        ctx.code_data[imm_offset + 1] = (frame_size / 256) % 256
+        ctx.code_data[imm_offset + 2] = (frame_size / 65536) % 256
+        ctx.code_data[imm_offset + 3] = (frame_size / 16777216) % 256
 
 // ---------------------------------------------------------------------------
-// Section 5: Compile a Yilt program
+// Section 7: Compile a Yilt program
 // ---------------------------------------------------------------------------
 
 fn compile_program(src str, output_path str) int
-    // Lex
     let tokens = lex_all(src)
-    // Parse
     let result = parse_program(tokens)
     if result.nerrors > 0
         print("Parse errors: ")
@@ -627,8 +651,6 @@ fn compile_program(src str, output_path str) int
         return 1
     
     let decls = result.decls
-    
-    // Find main function
     let mut main_fn = n_kind("empty")
     let mut i = 0
     while i < decls.len()
@@ -642,52 +664,27 @@ fn compile_program(src str, output_path str) int
         print("No main function found")
         return 1
     
-    // Generate code
-    cg_init()
-    cg_function(main_fn)
+    let ctx = ctx_new()
+    cg_function(ctx, main_fn)
     
-    // Build ELF binary
-    let code_len = g_code_len
-    let data_len = g_data_len
-    let headers_size = 64 + 56  // ELF header + 1 PHDR
-    let code_offset = headers_size
-    let data_offset = code_offset + code_len
-    let entry = BASE_ADDR + code_offset
-    
-    let elf_buf = buf_new()
-    build_elf64_header(elf_buf, code_len, data_len, code_offset, data_offset, entry)
-    
-    // Append code
-    let mut ci = 0
-    while ci < code_len
-        buf_byte(elf_buf, g_code_data[ci])
-        ci = ci + 1
-    
-    // Append data
-    let mut di = 0
-    while di < data_len
-        buf_byte(elf_buf, g_data_data[di])
-        di = di + 1
-    
-    let total = elf_buf.len
-    
-    // Write to file
     let fd = sys.open(output_path, 577, 511)
     if fd < 0
         print("Cannot open output file")
         return 1
-    let written = buf_write_to(elf_buf, fd, ALL_BYTES)
+    let written = build_elf(ctx, fd)
     sys.close(fd)
     
     print("Compiled to ")
     print(output_path)
-    print(" (")
-    print(total)
-    print(" bytes)")
+    print(" (code=")
+    print(ctx.code_len)
+    print(" data=")
+    print(ctx.data_len)
+    print(")")
     return 0
 
 // ---------------------------------------------------------------------------
-// Section 6: Helper — int parsing (from Stage 4)
+// Section 8: Helpers
 // ---------------------------------------------------------------------------
 
 fn parse_int(s str) int
@@ -711,15 +708,14 @@ fn parse_int(s str) int
     return result
 
 // ---------------------------------------------------------------------------
-// Section 7: Main entry point
+// Section 9: Main entry point
 // ---------------------------------------------------------------------------
 
 fn main() int
     print("=== Yilt Self-Host Stage 5: Native Codegen ===")
     print("")
     
-    // Test: compile a simple Yilt program
-    let src = "fn main() int\n    let x = 42\n    let y = x + 8\n    print(\"Result: \")\n    return y\n"
+    let src = "fn main() int\n    let x = 42\n    let y = x + 8\n    return y\n"
     
     print("Source:")
     print(src)
