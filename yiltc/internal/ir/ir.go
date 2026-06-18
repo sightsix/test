@@ -141,6 +141,7 @@ const (
         OpConstBool
         OpConstNil
         OpConstRawInt
+        OpConstTaggedStr
 
         // ---- Arithmetic ----
         OpAdd
@@ -232,6 +233,10 @@ func (op Op) String() string {
                 return "const.bool"
         case OpConstNil:
                 return "const.nil"
+        case OpConstRawInt:
+                return "const.raw"
+        case OpConstTaggedStr:
+                return "const.tagstr"
         case OpAdd:
                 return "add"
         case OpSub:
@@ -946,6 +951,17 @@ func (b *Builder) ConstStr(val string, name string) *Value {
         v := b.allocReg(VStr, name)
         v.Const = &ConstVal{Kind: VStr, StrVal: val}
         b.cur.AddInstr(&Instr{Op: OpConstStr, Dest: v})
+        return v
+}
+
+// ConstTaggedStr emits a pre-tagged string constant: a StrHeader+data blob
+// stored in .rodata, loaded as a tagged value (TAG_STR | pointer).
+// Unlike ConstStr + y_str_new, this requires NO runtime allocation —
+// the string is baked into the binary at compile time.
+func (b *Builder) ConstTaggedStr(val string, name string) *Value {
+        v := b.allocReg(VTagged, name)
+        v.Const = &ConstVal{Kind: VStr, StrVal: val}
+        b.cur.AddInstr(&Instr{Op: OpConstTaggedStr, Dest: v})
         return v
 }
 

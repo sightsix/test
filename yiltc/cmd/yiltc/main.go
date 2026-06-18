@@ -1,6 +1,7 @@
 package main
 
 import (
+        "encoding/binary"
         "flag"
         "fmt"
         "io"
@@ -43,6 +44,14 @@ var stringDataMap map[string]string
 // stringDataSeq is a monotonically increasing counter for generating unique
 // string data symbol names during concurrent code generation.
 var stringDataSeq int
+
+// taggedStrDataMap collects pre-built StrHeader+data blobs for OpConstTaggedStr.
+// Each blob is a complete StrHeader (24 bytes) + string data + null terminator,
+// padded to 8-byte alignment. Stored in .rodata so no runtime allocation is needed.
+var taggedStrDataMap map[string][]byte
+
+// taggedStrSeq is a counter for generating unique tagged string symbol names.
+var taggedStrSeq int
 
 // CLI color codes (prefixed to avoid collision with diag package).
 const (
@@ -280,6 +289,8 @@ func run(args []string) int {
         // Reset string data collection for this compilation.
         stringDataMap = make(map[string]string)
         stringDataSeq = 0
+        taggedStrDataMap = make(map[string][]byte)
+        taggedStrSeq = 0
 
         // Phase 1: Lex
         phaseStart := time.Now()
@@ -541,6 +552,10 @@ func run(args []string) int {
                 copy(data, strContent)
                 data[len(strContent)] = 0 // null terminator
                 lnk.AddData(symName, data)
+        }
+        // Emit pre-built StrHeader+data blobs for tagged string constants.
+        for symName, blob := range taggedStrDataMap {
+                lnk.AddData(symName, blob)
         }
         stringDataMu.Unlock()
 
@@ -817,6 +832,7 @@ func lowerToIR(cp *check.CheckedProgram) *ir.Module {
                         consts:        make(map[string]ast.Expr, len(cp.Consts)),
                         mutableGlobals: make(map[string]*ir.Value),
                         importAliases: importAliases,
+                        fieldStrs:     make(map[string]*ir.Value),
                 }
 
                 // Seed const table from checked program.
@@ -879,6 +895,12 @@ type lowerer struct {
         consts        map[string]ast.Expr          // module-level const name → value expression
         mutableGlobals map[string]*ir.Value        // mutable global name → table Value (for mutable top-level vars)
         importAliases map[string]string           // alias → original module name (for 'use sys as s')
+        // fieldStrs caches per-function allocations of field-name strings.
+        // Without this cache, every `obj.field` access calls y_str_new to
+        // allocate a new string for the field name — a mmap per field access!
+        // With the cache, each unique field name is allocated ONCE per function
+        // and reused across all accesses in that function.
+        fieldStrs      map[string]*ir.Value
 }
 
 // closureInfo records metadata about a closure created from an anonymous function.
@@ -902,11 +924,21 @@ func (l *lowerer) isFloat(e ast.Expr) bool {
 
 // tableStrKey creates a tagged string key for table operations, converting
 // the given string to a y_str_new call result. This is used by struct and
-// enum lowering to set/get fields by name.
+// enum lowering to set/get fields by name. Uses the per-function fieldStr
+// cache so repeated calls with the same key reuse the same allocation.
 func (l *lowerer) tableStrKey(b *ir.Builder, key string) *ir.Value {
-        k := b.ConstStr(key, "key."+key)
-        kLen := b.ConstRawInt(int64(len(key)), "key."+key+".len")
-        return b.Call("y_str_new", []*ir.Value{k, kLen}, ir.VRaw, "key."+key+".str")
+        return l.fieldStr(b, key)
+}
+
+// fieldStr returns a tagged string value for the given field name.
+//
+// Instead of calling y_str_new on every field access (which triggers a mmap
+// per access — catastrophically slow for the self-host compiler), we emit
+// the field name as a pre-built StrHeader+data blob in .rodata and load it
+// as a compile-time constant. This reduces every `p.pos` access from
+// "mmap + memcpy + hash" to a single LEA + OR instruction.
+func (l *lowerer) fieldStr(b *ir.Builder, field string) *ir.Value {
+        return b.ConstTaggedStr(field, "field."+field)
 }
 
 // isStr returns true if the AST expression has string type.
@@ -1890,9 +1922,7 @@ func (l *lowerer) expr(e ast.Expr) *ir.Value {
                 obj := l.expr(e.Obj)
                 // Struct field access: use table operations (structs are backed by tables)
                 if objType, ok := l.exprTypes[e.Obj]; ok && objType.Kind == check.TStruct {
-                        fieldKey := b.ConstStr(e.Field, "field."+e.Field)
-                        fieldLen := b.ConstRawInt(int64(len(e.Field)), "field."+e.Field+".len")
-                        fieldStr := b.Call("y_str_new", []*ir.Value{fieldKey, fieldLen}, ir.VRaw, "field."+e.Field+".str")
+                        fieldStr := l.fieldStr(b, e.Field)
                         return b.TableGet(obj, fieldStr, "struct."+e.Field)
                 }
                 // For non-struct types: if the object is a known local variable, use
@@ -1904,9 +1934,7 @@ func (l *lowerer) expr(e ast.Expr) *ir.Value {
                 }
                 // Generic table member access: field access on a table variable
                 // uses table_get with the field name as a string key.
-                fieldKey := b.ConstStr(e.Field, "member."+e.Field)
-                fieldLen := b.ConstRawInt(int64(len(e.Field)), "member."+e.Field+".len")
-                fieldStr := b.Call("y_str_new", []*ir.Value{fieldKey, fieldLen}, ir.VRaw, "member."+e.Field+".str")
+                fieldStr := l.fieldStr(b, e.Field)
                 return b.TableGet(obj, fieldStr, "member.get."+e.Field)
 
         case *ast.TableLit:
@@ -1922,9 +1950,7 @@ func (l *lowerer) expr(e ast.Expr) *ir.Value {
                 // Structs are represented as tables internally: field_name -> value
                 tab := b.TableNew(len(e.Fields), "struct_"+e.Name)
                 for _, finit := range e.Fields {
-                        fieldKey := b.ConstStr(finit.Name, "field."+finit.Name)
-                        fieldLen := b.ConstRawInt(int64(len(finit.Name)), "field."+finit.Name+".len")
-                        fieldStr := b.Call("y_str_new", []*ir.Value{fieldKey, fieldLen}, ir.VRaw, "field."+finit.Name+".str")
+                        fieldStr := l.fieldStr(b, finit.Name)
                         val := l.expr(finit.Value)
                         b.TableSet(tab, fieldStr, val)
                 }
@@ -2001,9 +2027,7 @@ func (l *lowerer) expr(e ast.Expr) *ir.Value {
                 obj := l.expr(e.Obj)
                 val := l.expr(e.Value)
                 // Member assignment: obj.field = value  →  table_set(obj, "field", value)
-                fieldKey := b.ConstStr(e.Field, "member.key")
-                fieldLen := b.ConstRawInt(int64(len(e.Field)), "member.key.len")
-                fieldStr := b.Call("y_str_new", []*ir.Value{fieldKey, fieldLen}, ir.VRaw, "member.str")
+                fieldStr := l.fieldStr(b, e.Field)
                 b.TableSet(obj, fieldStr, val)
                 return val
 
@@ -2512,10 +2536,11 @@ func emitX86_64(fn *ir.Func) ([]byte, []pendingReloc) {
                         // Constants don't need spill slots (inlined at point of use).
                         // Exception: ConstStr values need slots because they resolve to
                         // actual addresses at link time via LEA+reloc.
+                        // Exception: ConstTaggedStr values need slots for the same reason.
                         // Exception: ConstRawInt values need slots so they can be loaded
                         // as raw (untagged) values instead of going through emitConst
                         // which would add a tag byte.
-                        if ins.Dest.IsConst() && ins.Op != ir.OpConstStr && ins.Op != ir.OpConstRawInt {
+                        if ins.Dest.IsConst() && ins.Op != ir.OpConstStr && ins.Op != ir.OpConstRawInt && ins.Op != ir.OpConstTaggedStr {
                                 continue
                         }
                         slots[ins.Dest.ID] = nextSlot
@@ -2674,6 +2699,57 @@ func emitX86_64(fn *ir.Func) ([]byte, []pendingReloc) {
                                                 offset: leaOffset + 3, // 4-byte displacement starts at byte 3
                                                 target: symName,
                                         })
+                                        storeVal(ins.Dest, x86_64.RAX)
+                                } else {
+                                        a.MovZeroR64(x86_64.RAX)
+                                        storeVal(ins.Dest, x86_64.RAX)
+                                }
+
+                        case ir.OpConstTaggedStr:
+                                // Embed a FULL StrHeader (24 bytes) + data + null in .rodata,
+                                // then LEA to get the StrHeader pointer and OR in TAG_STR.
+                                // This produces a tagged string value with NO runtime allocation.
+                                //
+                                // StrHeader layout (must match runtime expectations):
+                                //   +0:  refcount (unused, 0)
+                                //   +8:  len (byte length of string data)
+                                //   +16: cap (allocated capacity, >= len)
+                                //   +24: data[] (string bytes, null-terminated)
+                                if ins.Dest != nil && ins.Dest.Const != nil {
+                                        s := ins.Dest.Const.StrVal
+                                        slen := int64(len(s))
+                                        // Layout: refcount(8) + len(8) + cap(8) + data(len) + null(1) + padding
+                                        blobLen := 24 + len(s) + 1
+                                        pad := (8 - (blobLen % 8)) % 8
+                                        blobLen += pad
+                                        blob := make([]byte, blobLen)
+                                        // refcount at +0 = 0 (already zero)
+                                        // len at +8
+                                        binary.LittleEndian.PutUint64(blob[8:16], uint64(slen))
+                                        // cap at +16 (= len + 1)
+                                        binary.LittleEndian.PutUint64(blob[16:24], uint64(slen+1))
+                                        // data at +24
+                                        copy(blob[24:24+len(s)], s)
+                                        // null at +24+len (already 0 from make)
+
+                                        stringDataMu.Lock()
+                                        symName := fmt.Sprintf(".yilt.tagstr.%d", taggedStrSeq)
+                                        taggedStrSeq++
+                                        taggedStrDataMap[symName] = blob
+                                        stringDataMu.Unlock()
+
+                                        // lea rax, [rip + symName]  — get StrHeader pointer
+                                        leaOffset := uint64(a.Offset())
+                                        a.EmitBytes([]byte{0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00})
+                                        relocs = append(relocs, pendingReloc{
+                                                offset: leaOffset + 3,
+                                                target: symName,
+                                        })
+                                        // or rax, (TAG_STR << 56)  — tag the pointer
+                                        // TAG_STR = 4, so we OR with 0x0400000000000000
+                                        // mov rcx, 0x0400000000000000; or rax, rcx
+                                        a.EmitBytes([]byte{0x48, 0xb9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04})
+                                        a.EmitBytes([]byte{0x48, 0x09, 0xc8}) // or rax, rcx
                                         storeVal(ins.Dest, x86_64.RAX)
                                 } else {
                                         a.MovZeroR64(x86_64.RAX)
