@@ -1,0 +1,13 @@
+// Test inserting 100K entries into a table — should reveal if rehash works
+fn main() int
+    let mut t = {}
+    let mut i = 0
+    while i < 100000
+        t[i] = i * 2
+        i = i + 1
+    print("Inserted 100000 entries")
+    print("t[50000] = ")
+    print(t[50000])
+    print("t[99999] = ")
+    print(t[99999])
+    return 0

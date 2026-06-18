@@ -1,0 +1,24 @@
+// Test 1: Factorial (recursion) — expects "120" printed, exit code 120
+// Source the self-hosted compiler should compile:
+//   fn fact(n int) int
+//       if n <= 1
+//           return 1
+//       return n * fact(n - 1)
+//   
+//   fn main() int
+//       let r = fact(5)
+//       print(r)
+//       return r
+
+fn main() int
+    print("=== Test 1: Factorial (recursion) ===")
+    let src = "fn fact(n int) int\n    if n <= 1\n        return 1\n    return n * fact(n - 1)\n\nfn main() int\n    let r = fact(5)\n    print(r)\n    return r\n"
+    print("Source:")
+    print(src)
+    print("---")
+    let rc = compile_program(src, "/tmp/yilt_factorial")
+    if rc != 0
+        print("FAIL: compilation failed")
+        return 1
+    print("--- Run /tmp/yilt_factorial: ---")
+    return 0

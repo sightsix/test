@@ -90,6 +90,7 @@ var ModuleMapping = map[string]string{
         "sys.write":     "y_sys_write",
         "sys.open":      "y_sys_open",
         "sys.close":     "y_sys_close",
+        "sys.read":      "y_sys_read",
         "sys.clock":     "y_sys_clock",
         "sys.sleep":     "y_sys_sleep",
         "sys.setenv":    "y_sys_setenv",

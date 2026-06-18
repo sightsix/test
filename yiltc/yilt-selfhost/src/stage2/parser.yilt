@@ -223,7 +223,8 @@ fn p_skip_indent(p Parser)
     while not done
         if p_at(p, T_INDENT) or p_at(p, T_NEWLINE)
             p_advance(p)
-        done = true
+        if not p_at(p, T_INDENT) and not p_at(p, T_NEWLINE)
+            done = true
 
 // p_skip_all_indent skips INDENT, DEDENT, and NEWLINE — use only between
 // top-level declarations where block structure doesn't matter.
@@ -232,7 +233,8 @@ fn p_skip_all_indent(p Parser)
     while not done
         if p_at(p, T_INDENT) or p_at(p, T_DEDENT) or p_at(p, T_NEWLINE)
             p_advance(p)
-        done = true
+        if not p_at(p, T_INDENT) and not p_at(p, T_DEDENT) and not p_at(p, T_NEWLINE)
+            done = true
 
 fn p_error(p Parser, msg str)
     let t = p_peek(p)
@@ -386,9 +388,40 @@ fn parse_params(p Parser) table
 fn parse_struct_decl(p Parser, is_pub bool) Node
     p_expect(p, T_STRUCT, "'struct'")
     let name_tok = p_expect(p, T_IDENT, "struct name")
-    let fields = parse_block(p)
+    let fields = parse_struct_body(p)
     let mut n = Node{kind: "struct_decl", sval: name_tok.value, ival: 0, bval: is_pub, a: {}, b: {}, c: {}, list: fields, extra: ""}
     return n
+
+// parse_struct_body parses a struct body: a sequence of field declarations,
+// each of the form `[mut] name type`.  Fields are separated by newlines.
+// Returns a table of Node (kind="field") indexed by integer.
+fn parse_struct_body(p Parser) table
+    let mut fields = {}
+    let mut idx = 0
+    if p_at(p, T_INDENT)
+        p_advance(p)
+    let mut done = false
+    while not done
+        p_skip_indent(p)
+        if p_at(p, T_DEDENT) or p_at(p, T_EOF)
+            done = true
+        if not done
+            // Parse: [mut] name type
+            let mut mutable = false
+            if p_at(p, T_MUT)
+                p_advance(p)
+                mutable = true
+            let name_tok = p_expect(p, T_IDENT, "field name")
+            let mut ftype = ""
+            if p_at(p, T_IDENT)
+                let tt = p_advance(p)
+                ftype = tt.value
+            let mut n = Node{kind: "field", sval: name_tok.value, ival: 0, bval: mutable, a: {}, b: {}, c: {}, list: {}, extra: ftype}
+            fields[idx] = n
+            idx = idx + 1
+    if p_at(p, T_DEDENT)
+        p_advance(p)
+    return fields
 
 fn parse_enum_decl(p Parser, is_pub bool) Node
     p_expect(p, T_ENUM, "'enum'")
@@ -669,24 +702,18 @@ fn parse_expr(p Parser) Node
 
 fn parse_or(p Parser) Node
     let mut left = parse_and(p)
-    let mut done = false
-    while not done
-        if p_at(p, T_OR)
-            p_advance(p)
-            let right = parse_and(p)
-            left = n_binary("or", left, right)
-        done = true
+    while p_at(p, T_OR)
+        p_advance(p)
+        let right = parse_and(p)
+        left = n_binary("or", left, right)
     return left
 
 fn parse_and(p Parser) Node
     let mut left = parse_eq(p)
-    let mut done = false
-    while not done
-        if p_at(p, T_AND)
-            p_advance(p)
-            let right = parse_eq(p)
-            left = n_binary("and", left, right)
-        done = true
+    while p_at(p, T_AND)
+        p_advance(p)
+        let right = parse_eq(p)
+        left = n_binary("and", left, right)
     return left
 
 fn parse_eq(p Parser) Node
@@ -702,7 +729,8 @@ fn parse_eq(p Parser) Node
             p_advance(p)
             let right = parse_cmp(p)
             left = n_binary("!=", left, right)
-        done = true
+        if k != T_EQ and k != T_NEQ
+            done = true
     return left
 
 fn parse_cmp(p Parser) Node
@@ -722,7 +750,8 @@ fn parse_cmp(p Parser) Node
         if k == T_GE
             p_advance(p)
             left = n_binary(">=", left, parse_add(p))
-        done = true
+        if k != T_LT and k != T_LE and k != T_GT and k != T_GE
+            done = true
     return left
 
 fn parse_add(p Parser) Node
@@ -736,7 +765,8 @@ fn parse_add(p Parser) Node
         if k == T_MINUS
             p_advance(p)
             left = n_binary("-", left, parse_mul(p))
-        done = true
+        if k != T_PLUS and k != T_MINUS
+            done = true
     return left
 
 fn parse_mul(p Parser) Node
@@ -753,7 +783,8 @@ fn parse_mul(p Parser) Node
         if k == T_PERCENT
             p_advance(p)
             left = n_binary("%", left, parse_unary(p))
-        done = true
+        if k != T_STAR and k != T_SLASH and k != T_PERCENT
+            done = true
     return left
 
 fn parse_unary(p Parser) Node
@@ -794,7 +825,8 @@ fn parse_postfix(p Parser) Node
             ea[0] = e
             let mut n = Node{kind: "error_prop", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
             e = n
-        done = true
+        if k != T_PERIOD and k != T_LBRACK and k != T_LPAREN and k != T_QUESTION
+            done = true
     return e
 
 fn parse_args(p Parser) table

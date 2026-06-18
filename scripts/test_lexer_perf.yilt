@@ -1,0 +1,44 @@
+// Time the lexer on a large source
+fn main() int
+    // Build a 60KB source string by concatenating lines
+    let mut src = "fn main() int\n    let mut sum = 0\n"
+    let mut i = 0
+    while i < 3000
+        src = src + "    sum = sum + " + int_to_str(i) + "\n"
+        i = i + 1
+    src = src + "    return sum\n"
+    print("Source length: ")
+    print(src.len())
+
+    print("Lexing...")
+    let tokens = lex_all(src)
+    print("Tokens: ")
+    print(tokens.len())
+
+    print("Parsing...")
+    let result = parse_program(tokens)
+    print("Parse errors: ")
+    print(result.nerrors)
+    print("Decls: ")
+    print(result.decls.len())
+
+    print("Done")
+    return 0
+
+fn int_to_str(n int) str
+    if n == 0
+        return "0"
+    let mut neg = false
+    let mut v = n
+    if v < 0
+        neg = true
+        v = -v
+    let mut digits = ""
+    let g = "0123456789"
+    while v > 0
+        let d = v % 10
+        digits = g.substr(d, d + 1) + digits
+        v = v / 10
+    if neg
+        digits = "-" + digits
+    return digits

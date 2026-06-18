@@ -1690,6 +1690,126 @@ func genPure_SysClose(rd *rodataBuilder) puregenFunc {
         return fb.finalize()
 }
 
+// genPure_SysRead: y_sys_read(fd: tagged_int, max_len: tagged_int) → tagged_str
+//
+// Reads up to max_len bytes from file descriptor fd. Returns a tagged string
+// containing the bytes read (length may be less than max_len if EOF is hit).
+// On error, returns an empty string.
+//
+// C equivalent:
+//   str y_sys_read(int fd, size_t max_len) {
+//     char *buf = alloca(max_len);
+//     size_t total = 0;
+//     while (total < max_len) {
+//       ssize_t n = read(fd, buf + total, max_len - total);
+//       if (n <= 0) break;
+//       total += n;
+//     }
+//     return y_str_new(buf, total);
+//   }
+func genPure_SysRead(rd *rodataBuilder) puregenFunc {
+        fb := newRtFuncBuilder("y_sys_read", rd)
+        a := fb.a
+
+        // Registers:
+        //   RDI = fd (tagged int) → extract to RDI
+        //   RSI = max_len (tagged int) → extract to RSI, cap at 1MB
+        //   R12 = total bytes read (callee-saved)
+        //   R13 = buf ptr (callee-saved)
+        //   R14 = max_len (callee-saved)
+        //   R15 = fd (callee-saved)
+
+        // Prologue: save callee-saved
+        a.PUSH(x86_64.RBX)
+        a.PUSH(x86_64.R12)
+        a.PUSH(x86_64.R13)
+        a.PUSH(x86_64.R14)
+        a.PUSH(x86_64.R15)
+
+        // Extract fd: sign-extend 56-bit payload from RDI
+        fb.getInt(x86_64.RDI, x86_64.RDI)
+        a.MovRR(x86_64.R15, x86_64.RDI) // R15 = fd
+
+        // Extract max_len: sign-extend 56-bit payload from RSI
+        fb.getInt(x86_64.RSI, x86_64.RSI)
+        // Cap max_len at 1MB (0x100000) to avoid blowing the stack
+        a.MovRM(x86_64.RAX, 0x100000)
+        a.CmpRR(x86_64.RSI, x86_64.RAX)
+        // if RSI <= RAX, skip the MOV (keep RSI). Else set RSI = RAX (1MB cap).
+        capSkipLabel := a.GenLabel("sysread_cap_skip")
+        a.JLE(capSkipLabel)
+        a.MovRR(x86_64.RSI, x86_64.RAX)
+        a.Label(capSkipLabel)
+        a.MovRR(x86_64.R14, x86_64.RSI) // R14 = max_len
+
+        // Allocate stack buffer: SUB RSP, max_len (rounded up to 16 for alignment)
+        // First, round max_len up to a multiple of 16
+        a.AddRI(x86_64.RSI, 15)
+        a.AndRI(x86_64.RSI, -16)
+        a.SubRR(x86_64.RSP, x86_64.RSI)
+        // RSP now points to a max_len-aligned buffer
+        a.MovRR(x86_64.R13, x86_64.RSP) // R13 = buf ptr
+
+        // total = 0
+        a.MovZeroR64(x86_64.R12)
+
+        // Loop:
+        //   while total < max_len:
+        //     n = read(fd, buf + total, max_len - total)
+        //     if n <= 0: break
+        //     total += n
+        readLoopLabel := a.GenLabel("sysread_loop")
+        readDoneLabel := a.GenLabel("sysread_done")
+
+        a.Label(readLoopLabel)
+        // if total >= max_len, done
+        a.CmpRR(x86_64.R12, x86_64.R14)
+        a.JGE(readDoneLabel)
+
+        // RDI = fd
+        a.MovRR(x86_64.RDI, x86_64.R15)
+        // RSI = buf + total
+        a.LEA(x86_64.RSI, x86_64.MemIndex(x86_64.R13, x86_64.R12, 1, 0))
+        // RDX = max_len - total
+        a.MovRR(x86_64.RDX, x86_64.R14)
+        a.SubRR(x86_64.RDX, x86_64.R12)
+        // RAX = SYS_read (0)
+        a.MovRM(x86_64.RAX, 0)
+        a.SYSCALL()
+
+        // if RAX <= 0, done
+        a.TestRR(x86_64.RAX, x86_64.RAX)
+        a.JLE(readDoneLabel)
+
+        // total += RAX
+        a.AddRR(x86_64.R12, x86_64.RAX)
+        a.JMP(readLoopLabel)
+
+        a.Label(readDoneLabel)
+        // RDI = buf, RSI = total
+        a.MovRR(x86_64.RDI, x86_64.R13)
+        a.MovRR(x86_64.RSI, x86_64.R12)
+        a.CALL("y_str_new")
+        fb.addRelocText("y_str_new")
+        // RAX = tagged string result
+
+        // Epilogue: deallocate stack buffer + restore callee-saved
+        // Compute stack dealloc amount = (max_len + 15) & ~15 (same as alloc)
+        a.MovRR(x86_64.RCX, x86_64.R14)
+        a.AddRI(x86_64.RCX, 15)
+        a.AndRI(x86_64.RCX, -16)
+        a.AddRR(x86_64.RSP, x86_64.RCX)
+
+        a.POP(x86_64.R15)
+        a.POP(x86_64.R14)
+        a.POP(x86_64.R13)
+        a.POP(x86_64.R12)
+        a.POP(x86_64.RBX)
+        a.RET()
+
+        return fb.finalize()
+}
+
 // genPure_SysArgs: y_sys_args() → tagged
 // Stub — matches C runtime (returns nil).
 func genPure_SysArgs(rd *rodataBuilder) puregenFunc {
@@ -2028,6 +2148,7 @@ func init() {
                 genPure_SysWrite,        // y_sys_write (raw file write)
                 genPure_SysOpen,         // y_sys_open (raw file open)
                 genPure_SysClose,        // y_sys_close (raw file close)
+                genPure_SysRead,         // y_sys_read (raw file read)
                 genPure_Copy,            // y_copy
                 genPure_Promote,         // y_promote
                 genPure_Neg,             // y_neg

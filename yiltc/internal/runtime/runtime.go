@@ -610,6 +610,12 @@ func init() {
                 Description: "Close a file descriptor. Returns 0 on success.",
         })
         add(RuntimeSymbol{
+                Name:        "y_sys_read",
+                Signature:   "(i,i)->s",
+                Category:    CatSys,
+                Description: "Read up to max_len bytes from a file descriptor. Returns the bytes as a string.",
+        })
+        add(RuntimeSymbol{
                 Name:        "y_sys_clock",
                 Signature:   "()->f",
                 Category:    CatSys,

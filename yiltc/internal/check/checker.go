@@ -464,6 +464,7 @@ var stdModuleExports = map[string][]struct {
                 {"write", TypeDesc{Kind: TFunc, Params: []*TypeDesc{&IntDesc, &StrDesc, &IntDesc}, Ret: &IntDesc}},
                 {"open", TypeDesc{Kind: TFunc, Params: []*TypeDesc{&StrDesc, &IntDesc, &IntDesc}, Ret: &IntDesc}},
                 {"close", TypeDesc{Kind: TFunc, Params: []*TypeDesc{&IntDesc}, Ret: &IntDesc}},
+                {"read", TypeDesc{Kind: TFunc, Params: []*TypeDesc{&IntDesc, &IntDesc}, Ret: &StrDesc}},
                 {"stdin", GenDesc},
                 {"stdout", GenDesc},
                 {"stderr", GenDesc},

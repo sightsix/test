@@ -1,0 +1,13 @@
+fn main() int
+    let fd = sys.open("/etc/hostname", 0, 0)
+    if fd < 0
+        print("FAIL: cannot open")
+        return 1
+    let s = sys.read(fd, 256)
+    sys.close(fd)
+    print("Read: '")
+    print(s)
+    print("'")
+    print("Length: ")
+    print(s.len())
+    return 0

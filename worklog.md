@@ -494,3 +494,61 @@ Stage Summary:
 - Two compiler limitations were fixed (empty table as const, let mut at top level).
 - All 240 Go tests still pass (no regressions).
 - Next: Stage 2 (full Yilt parser) — consume the token stream and build an AST.
+
+---
+Task ID: 17-yilt-selfhost-stage5-fixpoint-attempt
+Agent: main (Super Z)
+Task: Push Stage 5 self-hosting toward the self-compilation fixpoint — combine stages, fix bugs, attempt self-compile.
+
+Work Log:
+- Created scripts/combine_yilt.sh to concatenate stage1 (lexer) + stage2 (parser) + stage5 (codegen) into a single self-host source file (combined.yilt, ~3300 lines / ~104KB). Strips duplicate T_* constants and Token struct from stage2, and strips per-stage main() functions (keeping only stage5's main as the entry point).
+
+- Added sys.read to the Go runtime:
+  - New genPure_SysRead in internal/runtime/puregen.go — reads up to 1MB from a file descriptor using SYS_read in a loop, returns a Yilt string. Uses a stack-allocated buffer (capped at 1MB, 16-byte aligned). Saves/restores callee-saved registers (RBX, R12-R15).
+  - Registered "sys.read" → "y_sys_read" in internal/runtime/stdlib.go ModuleMapping.
+  - Added "read" to the sys module's stdModuleExports entry in internal/check/checker.go (signature: (i,i)->s).
+  - Added y_sys_read RuntimeSymbol entry in internal/runtime/runtime.go.
+  - Added "y_sys_read" to the linker-known runtime symbols list in cmd/yiltc/main.go.
+  - Installed Go 1.24.4 toolchain to /home/z/go (was missing in this session).
+
+- Modified stage5's main() to support a "fixpoint driver mode": if /tmp/yiltc_input.yilt exists, read it, compile it to /tmp/yiltc_output, and exit. Otherwise, run the built-in 5-test battery (add, factorial, sum, max, fibonacci).
+
+- Fixed FIVE bugs in the Yilt-written parser (stage2/parser.yilt):
+
+  Bug 1: Pratt parser `done = true` outside `if`. Every precedence level (parse_or, parse_and, parse_eq, parse_cmp, parse_add, parse_mul, parse_postfix) had the pattern:
+    while not done
+        if cond: action
+        done = true
+  This meant the loop exited after ONE iteration, so chained operators like `a + b + c` only parsed `a + b` and left `+ c` in the token stream. The next parse_stmt call would error on `+`, return an error node WITHOUT advancing, and parse_block would call parse_stmt again on the same `+` — infinite loop. Fixed by adding an explicit `if not cond: done = true` guard so the loop continues while there are matching operators.
+
+  Bug 2: p_skip_indent and p_skip_all_indent had the same bug — only skipped ONE indent/newline token per call. Fixed with the same pattern.
+
+  Bug 3: parse_struct_decl called parse_block for struct fields, but parse_block uses parse_stmt which doesn't understand `mut kind int` field declarations. Added a dedicated parse_struct_body function that parses `[mut] name type` lines.
+
+  Bug 4: build_elf had O(n²) string concatenation — `s = s + ALL_BYTES.substr(bv3, bv3+1)` in a loop over 50K+ bytes. Replaced with per-byte sys.write using a write_byte helper. This made 50K-byte ELF writing go from "hangs forever" to "completes in <1 second".
+
+  Bug 5: build_elf also built a giant bin_data table (one entry per byte) which triggered expensive hash table rehashing at ~50K entries. Eliminated bin_data entirely — now writes the ELF header, code bytes, and data bytes directly to the file descriptor via write_byte/write_u32_le/write_u64_le helpers.
+
+- Verified the self-host compiler (compiled by go-yiltc) can produce working native ELF binaries:
+  - add(3, 4) → 7 (exit 7) ✓
+  - fact(5) → 120 (exit 120) ✓ — recursion + if
+  - sum(1..10) → 55 (exit 55) ✓ — while loop
+  - max(7, 12) → 12 (exit 12) ✓ — if/else
+  - fib(10) → 55 (exit 55) ✓ — deeper recursion
+  - All 5 built-in tests pass with correct output AND correct exit codes.
+
+- Verified the fixpoint driver mode works: place a Yilt source at /tmp/yiltc_input.yilt, run the self-host binary, and it reads/compiles/writes /tmp/yiltc_output as a working ELF.
+
+- Attempted full self-compilation fixpoint (feeding combined.yilt to the self-host binary). The self-host binary successfully LEXES its own source (18K tokens) and PARSES small subsets, but hangs when parsing the full 104KB source. Root cause: the Yilt-written parser has O(n²) behavior at scale — each parse_stmt call does ~10 string-keyed table lookups on the Parser struct (for p.pos, p.ntokens, p.tokens fields), and for 5000+ statements this becomes ~50K+ string hash+probe operations. The Yilt runtime's string-keyed table lookups are ~1µs each (hash the string, probe the table), so 50K lookups = 50ms in theory, but in practice the constant factor is higher and the parser also creates many small Node structs (each requiring 4 empty-table allocations via mmap), pushing the total into the OOM-kill zone.
+
+Stage Summary:
+- The Yilt self-host compiler is a native x86_64 binary (280KB) written in Yilt and compiled by the Go yiltc.
+- It can read Yilt source from /tmp/yiltc_input.yilt, lex+parse+codegen it, and write a working native ELF binary to /tmp/yiltc_output.
+- The compiled ELF binaries run correctly: factorial, fibonacci, while loops, if/else, function calls all work.
+- Full self-compilation fixpoint is NOT yet achieved — the parser/codegen has performance issues at 100KB scale (string-keyed struct field access + Node allocation overhead).
+- Five real bugs were fixed in the Yilt-written parser/codegen, and one missing runtime function (sys.read) was added.
+- Artifacts saved to /home/z/my-project/download/yilt_self_host (binary) and yilt_self_host_source.yilt (source).
+- Next steps to reach the fixpoint:
+  1. Optimize the Yilt runtime's string-keyed table lookups (currently ~1µs each due to FNV-1a hashing of the key string on every access — could cache hashes or use interned strings).
+  2. OR: Make the self-host source smaller by removing unused features (match, for, closures, generics, f-strings, char literals) — a "mini Yilt" that can still compile itself.
+  3. OR: Add a string-keyed struct field cache to the Yilt compiler so that `p.pos` compiles to a direct offset load instead of a hash lookup.

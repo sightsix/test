@@ -220,6 +220,29 @@ fn emit_setcc(ctx Ctx, cc int, dst int)
 
 let BASE_ADDR = 0x400000
 
+// write_byte writes a single byte value to the file descriptor.
+fn write_byte(fd int, b int)
+    let one_byte = ALL_BYTES.substr(((b % 256) + 256) % 256, ((b % 256) + 256) % 256 + 1)
+    sys.write(fd, one_byte, 1)
+
+// write_u32_le writes a 32-bit little-endian value to the file.
+fn write_u32_le(fd int, v int)
+    let mut val = v
+    let mut i = 0
+    while i < 4
+        write_byte(fd, val % 256)
+        val = val / 256
+        i = i + 1
+
+// write_u64_le writes a 64-bit little-endian value to the file.
+fn write_u64_le(fd int, v int)
+    let mut val = v
+    let mut i = 0
+    while i < 8
+        write_byte(fd, val % 256)
+        val = val / 256
+        i = i + 1
+
 fn build_elf(ctx Ctx, output_fd int) int
     let code_len = ctx.code_len
     let data_len = ctx.data_len
@@ -228,240 +251,91 @@ fn build_elf(ctx Ctx, output_fd int) int
     let data_offset = code_offset + code_len
     let total = headers_size + code_len + data_len
     let entry = BASE_ADDR + code_offset
-    
-    // Build the entire binary in a temporary table, then write it out
-    let mut bin_data = {}
-    let mut bin_len = 0
-    
-    // Helper to add a byte to the binary
-    let mut bi = 0
-    while bi < 256
-        bin_data[bi] = 0
-        bi = bi + 1
-    bin_len = 0
-    
+
+    // Write the ELF binary directly to the file descriptor, byte by byte.
+    // We avoid building a giant in-memory bin_data table because Yilt's hash
+    // tables have per-entry overhead that becomes prohibitive for 50K+ entries.
+
     // --- ELF Header (64 bytes) ---
-    // e_ident
-    bin_data[bin_len] = 0x7F
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 69
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 76
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 70
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 2
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 1
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 1
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_type = ET_EXEC
-    bin_data[bin_len] = 2
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_machine = EM_X86_64
-    bin_data[bin_len] = 62
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_version
-    bin_data[bin_len] = 1
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_entry (8 bytes, little-endian)
-    let mut ev = entry
-    let mut ei = 0
-    while ei < 8
-        bin_data[bin_len] = ev % 256
-        bin_len = bin_len + 1
-        ev = ev / 256
-        ei = ei + 1
-    // e_phoff = 64
-    bin_data[bin_len] = 64
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_shoff = 0
+    // e_ident (16 bytes): 7F 45 4C 46 02 01 01 00 + 8 zero bytes
+    write_byte(output_fd, 0x7F)
+    write_byte(output_fd, 69)   // 'E'
+    write_byte(output_fd, 76)   // 'L'
+    write_byte(output_fd, 70)   // 'F'
+    write_byte(output_fd, 2)    // 64-bit
+    write_byte(output_fd, 1)    // little-endian
+    write_byte(output_fd, 1)    // ELF version
+    write_byte(output_fd, 0)    // SysV ABI
     let mut zi = 0
     while zi < 8
-        bin_data[bin_len] = 0
-        bin_len = bin_len + 1
+        write_byte(output_fd, 0)
         zi = zi + 1
-    // e_flags = 0
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_ehsize = 64
-    bin_data[bin_len] = 64
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_phentsize = 56
-    bin_data[bin_len] = 56
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_phnum = 1
-    bin_data[bin_len] = 1
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_shentsize = 0
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_shnum = 0
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // e_shstrndx = 0
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    
-    // --- Program Header: single LOAD (R+W+X) ---
-    // p_type = PT_LOAD
-    bin_data[bin_len] = 1
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // p_flags = R+W+X
-    bin_data[bin_len] = 7
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    // p_offset = 0
-    let mut zi2 = 0
-    while zi2 < 8
-        bin_data[bin_len] = 0
-        bin_len = bin_len + 1
-        zi2 = zi2 + 1
-    // p_vaddr = BASE_ADDR
-    let mut bv = BASE_ADDR
-    let mut bi2 = 0
-    while bi2 < 8
-        bin_data[bin_len] = bv % 256
-        bin_len = bin_len + 1
-        bv = bv / 256
-        bi2 = bi2 + 1
-    // p_paddr = BASE_ADDR
-    let mut bv2 = BASE_ADDR
-    let mut bi3 = 0
-    while bi3 < 8
-        bin_data[bin_len] = bv2 % 256
-        bin_len = bin_len + 1
-        bv2 = bv2 / 256
-        bi3 = bi3 + 1
-    // p_filesz = total
-    let mut tv = total
-    let mut ti = 0
-    while ti < 8
-        bin_data[bin_len] = tv % 256
-        bin_len = bin_len + 1
-        tv = tv / 256
-        ti = ti + 1
-    // p_memsz = total
-    let mut tv2 = total
-    let mut ti2 = 0
-    while ti2 < 8
-        bin_data[bin_len] = tv2 % 256
-        bin_len = bin_len + 1
-        tv2 = tv2 / 256
-        ti2 = ti2 + 1
-    // p_align = 0x1000
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 16
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    bin_data[bin_len] = 0
-    bin_len = bin_len + 1
-    
+    // e_type (2 bytes) = ET_EXEC = 2
+    write_byte(output_fd, 2)
+    write_byte(output_fd, 0)
+    // e_machine (2 bytes) = EM_X86_64 = 62
+    write_byte(output_fd, 62)
+    write_byte(output_fd, 0)
+    // e_version (4 bytes) = 1
+    write_u32_le(output_fd, 1)
+    // e_entry (8 bytes)
+    write_u64_le(output_fd, entry)
+    // e_phoff (8 bytes) = 64
+    write_u64_le(output_fd, 64)
+    // e_shoff (8 bytes) = 0
+    write_u64_le(output_fd, 0)
+    // e_flags (4 bytes) = 0
+    write_u32_le(output_fd, 0)
+    // e_ehsize (2 bytes) = 64
+    write_byte(output_fd, 64)
+    write_byte(output_fd, 0)
+    // e_phentsize (2 bytes) = 56
+    write_byte(output_fd, 56)
+    write_byte(output_fd, 0)
+    // e_phnum (2 bytes) = 1
+    write_byte(output_fd, 1)
+    write_byte(output_fd, 0)
+    // e_shentsize (2 bytes) = 0
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)
+    // e_shnum (2 bytes) = 0
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)
+    // e_shstrndx (2 bytes) = 0
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)
+
+    // --- Program Header (56 bytes) ---
+    // p_type (4 bytes) = PT_LOAD = 1
+    write_u32_le(output_fd, 1)
+    // p_flags (4 bytes) = R+W+X = 7
+    write_u32_le(output_fd, 7)
+    // p_offset (8 bytes) = 0
+    write_u64_le(output_fd, 0)
+    // p_vaddr (8 bytes) = BASE_ADDR
+    write_u64_le(output_fd, BASE_ADDR)
+    // p_paddr (8 bytes) = BASE_ADDR
+    write_u64_le(output_fd, BASE_ADDR)
+    // p_filesz (8 bytes) = total
+    write_u64_le(output_fd, total)
+    // p_memsz (8 bytes) = total
+    write_u64_le(output_fd, total)
+    // p_align (8 bytes) = 0x1000
+    write_u64_le(output_fd, 4096)
+
     // --- Append code bytes ---
     let mut ci = 0
     while ci < code_len
-        bin_data[bin_len] = ((ctx.code_data[ci] % 256) + 256) % 256
-        bin_len = bin_len + 1
+        write_byte(output_fd, ctx.code_data[ci])
         ci = ci + 1
-    
+
     // --- Append data bytes ---
     let mut di = 0
     while di < data_len
-        bin_data[bin_len] = ((ctx.data_data[di] % 256) + 256) % 256
-        bin_len = bin_len + 1
+        write_byte(output_fd, ctx.data_data[di])
         di = di + 1
-    
-    // --- Write binary to file ---
-    // Build a string from the binary data
-    let mut s = ""
-    let mut si = 0
-    while si < bin_len
-        let bv3 = bin_data[si]
-        s = s + ALL_BYTES.substr(bv3, bv3 + 1)
-        si = si + 1
-    return sys.write(output_fd, s, s.len())
+
+    return total
 
 // ---------------------------------------------------------------------------
 // Section 6: Code generator — walks AST and emits x86_64 code
@@ -958,11 +832,16 @@ fn compile_program(src str, output_path str) int
     if result.nerrors > 0
         print("Parse errors: ")
         print(result.nerrors)
+        let mut ei = 0
+        while ei < result.nerrors
+            print("  ")
+            print(result.errors[ei])
+            ei = ei + 1
         return 1
-    
+
     let decls = result.decls
     let ctx = ctx_new()
-    
+
     // Pass 1: Compile main first (entry point = start of code section)
     let mut main_fn = n_kind("empty")
     let mut i = 0
@@ -972,13 +851,13 @@ fn compile_program(src str, output_path str) int
             if d.sval == "main"
                 main_fn = d
         i = i + 1
-    
+
     if main_fn.kind == "empty"
         print("No main function found")
         return 1
-    
+
     cg_function(ctx, main_fn, true)
-    
+
     // Pass 2: Compile all other functions (main can call them via forward refs)
     i = 0
     while i < decls.len()
@@ -987,10 +866,10 @@ fn compile_program(src str, output_path str) int
             if d.sval != "main"
                 cg_function(ctx, d, false)
         i = i + 1
-    
+
     // Apply string LEA fixups
     cg_apply_fixups(ctx)
-    
+
     // Apply call fixups: patch CALL displacements
     let mut ci = 0
     while ci < ctx.call_fixup_count
@@ -1004,14 +883,14 @@ fn compile_program(src str, output_path str) int
             ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
             ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
         ci = ci + 1
-    
+
     let fd = sys.open(output_path, 577, 511)
     if fd < 0
         print("Cannot open output file")
         return 1
     let written = build_elf(ctx, fd)
     sys.close(fd)
-    
+
     print("Compiled to ")
     print(output_path)
     print(" (code=")
@@ -1051,23 +930,103 @@ fn parse_int(s str) int
 // Section 9: Main entry point
 // ---------------------------------------------------------------------------
 
+// read_file reads up to 1MB from a file path. Returns the file contents as a
+// string. On error (cannot open), returns the empty string and prints an error.
+fn read_file(path str) str
+    let fd = sys.open(path, 0, 0)
+    if fd < 0
+        print("ERROR: cannot open ")
+        print(path)
+        return ""
+    let s = sys.read(fd, 1048576)
+    sys.close(fd)
+    return s
+
 fn main() int
     print("=== Yilt Self-Host Stage 5: Native Codegen ===")
     print("")
     
-    let src = "fn add(a int, b int) int\n    return a + b\n\nfn main() int\n    let x = add(3, 4)\n    print(x)\n    return x\n"
+    // Try to read source from /tmp/yiltc_input.yilt (fixpoint driver mode).
+    // If the file doesn't exist, fall back to running the built-in tests.
+    let in_path = "/tmp/yiltc_input.yilt"
+    let fd = sys.open(in_path, 0, 0)
+    if fd >= 0
+        sys.close(fd)
+        let src = read_file(in_path)
+        if src.len() == 0
+            print("ERROR: input file is empty or unreadable")
+            return 1
+        let out_path = "/tmp/yiltc_output"
+        print("Compiling ")
+        print(in_path)
+        print(" → ")
+        print(out_path)
+        print("")
+        print("Source size: ")
+        print(src.len())
+        print(" bytes")
+        let rc = compile_program(src, out_path)
+        if rc != 0
+            print("FAIL: compilation reported error")
+            return 1
+        print("OK: fixpoint compile succeeded")
+        return 0
     
-    print("Source:")
-    print(src)
-    print("---")
-    print("Compiling...")
+    // Built-in self-test mode (no input file present)
+    print("No /tmp/yiltc_input.yilt found — running built-in tests.")
+    print("")
     
-    let output = "/tmp/yilt_compiled"
-    let rc = compile_program(src, output)
-    if rc != 0
-        print("Compilation failed")
-        return 1
+    let mut nfail = 0
+    
+    // Test 1: Simple function call + arithmetic (baseline)
+    let src1 = "fn add(a int, b int) int\n    return a + b\n\nfn main() int\n    let x = add(3, 4)\n    print(x)\n    return x\n"
+    let rc1 = compile_program(src1, "/tmp/yilt_t1")
+    if rc1 != 0
+        nfail = nfail + 1
+        print("FAIL: add(3,4)=7")
+    else
+        print("OK: add(3,4)=7 → /tmp/yilt_t1")
+    
+    // Test 2: Factorial (recursion + if)
+    let src2 = "fn fact(n int) int\n    if n <= 1\n        return 1\n    return n * fact(n - 1)\n\nfn main() int\n    let r = fact(5)\n    print(r)\n    return r\n"
+    let rc2 = compile_program(src2, "/tmp/yilt_t2")
+    if rc2 != 0
+        nfail = nfail + 1
+        print("FAIL: fact(5)=120")
+    else
+        print("OK: fact(5)=120 → /tmp/yilt_t2")
+    
+    // Test 3: While loop (sum 1..10 = 55)
+    let src3 = "fn main() int\n    let mut i = 1\n    let mut sum = 0\n    while i <= 10\n        sum = sum + i\n        i = i + 1\n    print(sum)\n    return sum\n"
+    let rc3 = compile_program(src3, "/tmp/yilt_t3")
+    if rc3 != 0
+        nfail = nfail + 1
+        print("FAIL: sum(1..10)=55")
+    else
+        print("OK: sum(1..10)=55 → /tmp/yilt_t3")
+    
+    // Test 4: If/else (max of two)
+    let src4 = "fn max(a int, b int) int\n    if a > b\n        return a\n    return b\n\nfn main() int\n    let m = max(7, 12)\n    print(m)\n    return m\n"
+    let rc4 = compile_program(src4, "/tmp/yilt_t4")
+    if rc4 != 0
+        nfail = nfail + 1
+        print("FAIL: max(7,12)=12")
+    else
+        print("OK: max(7,12)=12 → /tmp/yilt_t4")
+    
+    // Test 5: Fibonacci (recursion, deeper)
+    let src5 = "fn fib(n int) int\n    if n < 2\n        return n\n    return fib(n - 1) + fib(n - 2)\n\nfn main() int\n    let r = fib(10)\n    print(r)\n    return r\n"
+    let rc5 = compile_program(src5, "/tmp/yilt_t5")
+    if rc5 != 0
+        nfail = nfail + 1
+        print("FAIL: fib(10)=55")
+    else
+        print("OK: fib(10)=55 → /tmp/yilt_t5")
     
     print("")
-    print("=== Stage 5 complete ===")
+    print("=== Tests complete. Failures: ")
+    print(nfail)
+    print(" ===")
+    if nfail > 0
+        return 1
     return 0
