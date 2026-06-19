@@ -2514,12 +2514,20 @@ let X1 = 1
 let X2 = 2
 let X3 = 3
 let X4 = 4
+let X5 = 5
+let X6 = 6
+let X7 = 7
 let X8 = 8
 let X9 = 9
 let X10 = 10
 let X11 = 11
+let X12 = 12
+let X13 = 13
+let X14 = 14
+let X15 = 15
 let X16 = 16
 let X17 = 17
+let X18 = 18
 let X19 = 19
 let X20 = 20
 let X21 = 21
@@ -2681,10 +2689,13 @@ fn arm_bcond(ctx Ctx, cond int, offset int)
 
 // CSET Xd, cond (set register to 1 if condition, 0 otherwise)
 // CSET Xd, cond = CSINC Xd, XZR, XZR, invert(cond)
-// = 0x9A1F0400 | (inv_cond << 12) | Rd
+// CSINC encoding: 0x9A800400 | (Rm << 16) | (cond << 12) | (Rn << 5) | Rd
+// For CSET: Rm=31, Rn=31, cond=invert(cond)
+// = 0x9A800400 | (31 << 16) | (inv_cond << 12) | (31 << 5) | Rd
+// = 0x9A9F07E0 + (inv_cond << 12) + Rd
 fn arm_cset(ctx Ctx, dst int, cond int)
     let inv_cond = cond ^ 1
-    let instr = 0x9A1F0400 + (inv_cond * 4096) + dst
+    let instr = 0x9A9F07E0 + (inv_cond * 4096) + dst
     arm_emit(ctx, instr)
 
 // x86_64 register definitions
@@ -3009,6 +3020,10 @@ fn cg_apply_fixups(ctx Ctx)
         i = i + 1
 
 fn cg_expr(ctx Ctx, e Node)
+    // Multi-target dispatch: AArch64 path
+    if ctx.target == 1
+        arm_cg_expr(ctx, e)
+        return
     if e.kind == "int_lit"
         let val = parse_int(e.sval)
         emit_mov_r64_imm64(ctx, RAX, val)
@@ -3939,6 +3954,10 @@ fn cg_print_int(ctx Ctx)
 
 
 fn cg_stmt(ctx Ctx, s Node)
+    // Multi-target dispatch: AArch64 path
+    if ctx.target == 1
+        arm_cg_stmt(ctx, s)
+        return
     if s.kind == "let_stmt"
         let va = s.a
         let init = va[0]
@@ -4335,6 +4354,10 @@ fn cg_assert(ctx Ctx, s Node)
     ctx.code_data[jmp_end_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
 
 fn cg_function(ctx Ctx, fn_decl Node, is_main bool)
+    // Multi-target dispatch: AArch64 path
+    if ctx.target == 1
+        arm_cg_function(ctx, fn_decl, is_main)
+        return
     // Record function start offset
     let fn_start = ctx.code_len
     let fn_name = fn_decl.sval
@@ -4401,6 +4424,14 @@ fn compile_program(src str, output_path str) int
     let decls = result.decls
     let ctx = ctx_new()
 
+    // Multi-target selection: check for a target marker file.
+    // If /tmp/yilt_target_arm64 exists, target = AArch64 (1).
+    // Otherwise, target = x86_64 (0).
+    let target_fd = sys.open("/tmp/yilt_target_arm64", 0, 0)
+    if target_fd >= 0
+        sys.close(target_fd)
+        ctx.target = 1
+
     // Pre-scan: record function return types for type dispatch in print.
     let mut i = 0
     while i < decls.len()
@@ -4427,22 +4458,30 @@ fn compile_program(src str, output_path str) int
             if d.kind == "fn_decl"
                 cg_function(ctx, d, false)
             i = i + 1
-        cg_apply_fixups(ctx)
-        let mut ci = 0
-        while ci < ctx.call_fixup_count
-            let call_pos = ctx.call_fixups[ci * 2]
-            let fn_name = ctx.call_fixups[ci * 2 + 1]
-            if ctx.fn_table.has(fn_name)
-                let fn_start = ctx.fn_table[fn_name]
-                let disp = fn_start - (call_pos + 4)
-                ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
-                ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
-                ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
-                ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
-            ci = ci + 1
-        emit_mov_r64_imm64(ctx, RAX, 60)
-        emit_mov_r64_imm64(ctx, RDI, 0)
-        emit_syscall(ctx)
+        if ctx.target == 1
+            arm_apply_fixups(ctx)
+            arm_apply_call_fixups(ctx)
+            // Exit syscall for AArch64
+            arm_mov_imm64(ctx, X0, 0)
+            arm_mov_imm64(ctx, X8, 93)
+            arm_svc(ctx)
+        else
+            cg_apply_fixups(ctx)
+            let mut ci = 0
+            while ci < ctx.call_fixup_count
+                let call_pos = ctx.call_fixups[ci * 2]
+                let fn_name = ctx.call_fixups[ci * 2 + 1]
+                if ctx.fn_table.has(fn_name)
+                    let fn_start = ctx.fn_table[fn_name]
+                    let disp = fn_start - (call_pos + 4)
+                    ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
+                    ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
+                    ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
+                    ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
+                ci = ci + 1
+            emit_mov_r64_imm64(ctx, RAX, 60)
+            emit_mov_r64_imm64(ctx, RDI, 0)
+            emit_syscall(ctx)
         let fd = sys.open(output_path, 577, 511)
         if fd < 0
             print("Cannot open output file")
@@ -4469,22 +4508,27 @@ fn compile_program(src str, output_path str) int
                 cg_function(ctx, d, false)
         i = i + 1
 
-    // Apply string LEA fixups
-    cg_apply_fixups(ctx)
+    if ctx.target == 1
+        // AArch64: apply ADR and BL fixups
+        arm_apply_fixups(ctx)
+        arm_apply_call_fixups(ctx)
+    else
+        // x86_64: apply string LEA fixups
+        cg_apply_fixups(ctx)
 
-    // Apply call fixups: patch CALL displacements
-    let mut ci = 0
-    while ci < ctx.call_fixup_count
-        let call_pos = ctx.call_fixups[ci * 2]
-        let fn_name = ctx.call_fixups[ci * 2 + 1]
-        if ctx.fn_table.has(fn_name)
-            let fn_start = ctx.fn_table[fn_name]
-            let disp = fn_start - (call_pos + 4)
-            ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
-            ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
-            ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
-            ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
-        ci = ci + 1
+        // Apply call fixups: patch CALL displacements
+        let mut ci = 0
+        while ci < ctx.call_fixup_count
+            let call_pos = ctx.call_fixups[ci * 2]
+            let fn_name = ctx.call_fixups[ci * 2 + 1]
+            if ctx.fn_table.has(fn_name)
+                let fn_start = ctx.fn_table[fn_name]
+                let disp = fn_start - (call_pos + 4)
+                ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
+                ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
+                ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
+                ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
+            ci = ci + 1
 
     let fd = sys.open(output_path, 577, 511)
     if fd < 0
@@ -4860,3 +4904,901 @@ fn cg_int_to_str(ctx Ctx)
     let lea_pos = ctx.code_len
     emit_lea_rip(ctx, RAX, 0)
     cg_add_fixup(ctx, lea_pos, data_off)
+// ===========================================================================
+// AArch64 (ARM64) codegen — parallel path activated when ctx.target == 1
+// ===========================================================================
+// Mirrors the x86_64 path but emits AArch64 instructions.
+// Calling convention: X0=return/arg0, X1-X7=args, X8=syscall num,
+// X9-X15=caller-saved temps, X19-X28=callee-saved, X29=FP, X30=LR, X31=SP/XZR.
+// Frame layout: STP X29,X30,[SP,#-16]!; MOV X29,SP; SUB SP,SP,#frame
+// Local variables at X29-relative negative offsets (same convention as x86_64).
+// ===========================================================================
+
+// AArch64 condition codes
+let ARM_EQ = 0
+let ARM_NE = 1
+let ARM_CS = 2
+let ARM_CC = 3
+let ARM_MI = 4
+let ARM_PL = 5
+let ARM_VS = 6
+let ARM_VC = 7
+let ARM_HI = 8
+let ARM_LS = 9
+let ARM_GE = 10
+let ARM_LT = 11
+let ARM_GT = 12
+let ARM_LE = 13
+
+// Additional AArch64 instruction encoders
+
+// AND Xd, Xn, Xm (bitwise AND, 64-bit)
+fn arm_and(ctx Ctx, dst int, src1 int, src2 int)
+    let instr = 0x8A000000 + (src2 * 65536) + (src1 * 32) + dst
+    arm_emit(ctx, instr)
+
+// ORR Xd, Xn, Xm (bitwise OR, 64-bit)
+fn arm_orr(ctx Ctx, dst int, src1 int, src2 int)
+    let instr = 0xAA000000 + (src2 * 65536) + (src1 * 32) + dst
+    arm_emit(ctx, instr)
+
+// EOR Xd, Xn, Xm (bitwise XOR, 64-bit)
+fn arm_eor(ctx Ctx, dst int, src1 int, src2 int)
+    let instr = 0xCA000000 + (src2 * 65536) + (src1 * 32) + dst
+    arm_emit(ctx, instr)
+
+// SUB Xd, Xn, #imm12 (subtract 12-bit immediate, shift=0)
+fn arm_sub_imm(ctx Ctx, dst int, src int, imm12 int)
+    let instr = 0xD1000000 + ((imm12 & 4095) * 1024) + (src * 32) + dst
+    arm_emit(ctx, instr)
+
+// ADD Xd, Xn, #imm12 (add 12-bit immediate, shift=0)
+fn arm_add_imm(ctx Ctx, dst int, src int, imm12 int)
+    let instr = 0x91000000 + ((imm12 & 4095) * 1024) + (src * 32) + dst
+    arm_emit(ctx, instr)
+
+// STR Xd, [Xn, #offset] with safe offset handling
+fn arm_str_safe(ctx Ctx, src int, base int, offset int)
+    if offset >= 0 and offset <= 32760
+        let scaled = offset / 8
+        let instr = 0xF9000000 + (scaled * 1024) + (base * 32) + src
+        arm_emit(ctx, instr)
+    else
+        if offset < 0 and offset >= -4095
+            arm_sub_imm(ctx, X9, base, 0 - offset)
+            let instr = 0xF9000000 + (0 * 1024) + (X9 * 32) + src
+            arm_emit(ctx, instr)
+        else
+            arm_mov_imm64(ctx, X10, offset)
+            arm_add(ctx, X9, base, X10)
+            let instr = 0xF9000000 + (0 * 1024) + (X9 * 32) + src
+            arm_emit(ctx, instr)
+
+// LDR Xd, [Xn, #offset] with safe offset handling
+fn arm_ldr_safe(ctx Ctx, dst int, base int, offset int)
+    if offset >= 0 and offset <= 32760
+        let scaled = offset / 8
+        let instr = 0xF9400000 + (scaled * 1024) + (base * 32) + dst
+        arm_emit(ctx, instr)
+    else
+        if offset < 0 and offset >= -4095
+            arm_sub_imm(ctx, X9, base, 0 - offset)
+            let instr = 0xF9400000 + (0 * 1024) + (X9 * 32) + dst
+            arm_emit(ctx, instr)
+        else
+            arm_mov_imm64(ctx, X10, offset)
+            arm_add(ctx, X9, base, X10)
+            let instr = 0xF9400000 + (0 * 1024) + (X9 * 32) + dst
+            arm_emit(ctx, instr)
+
+// MOV Xd, Xn (alias for ORR Xd, XZR, Xn)
+// Special case: if src or dst is SP (31), use ADD Xd, SP, #0 (ORR can't use SP)
+fn arm_mov(ctx Ctx, dst int, src int)
+    if src == 31
+        // MOV Xd, SP = ADD Xd, SP, #0
+        let instr = 0x910003E0 + dst
+        arm_emit(ctx, instr)
+        return
+    if dst == 31
+        // MOV SP, Xn = ADD SP, Xn, #0
+        let instr = 0x91000000 + (src * 32) + 31
+        arm_emit(ctx, instr)
+        return
+    arm_mov_reg(ctx, dst, src)
+
+// CMP Xn, #imm5 (5-bit unsigned immediate, 64-bit)
+// = SUBS XZR, Xn, #imm = 0xF1000000 | (imm5 << 10) | (Xn << 5) | 31
+fn arm_cmp_imm(ctx Ctx, src int, imm5 int)
+    let instr = 0xF1000000 + ((imm5 & 31) * 1024) + (src * 32) + 31
+    arm_emit(ctx, instr)
+
+// AArch64 prologue: STP X29,X30,[SP,#-16]!; MOV X29,SP; SUB SP,SP,#0 (placeholder)
+// Returns the offset where frame_size immediate must be patched.
+fn arm_emit_prologue(ctx Ctx) int
+    // STP X29, X30, [SP, #-16]! (pre-index, store pair, allocate 16 bytes)
+    // Encoding: 0xA9800000 | (imm7 << 15) | (Rt2 << 10) | (Rn << 5) | Rt
+    // imm7 = -2 (signed 7-bit) = 0x7E
+    let stp_instr = 0xA9BF7BFD  // STP X29, X30, [SP, #-16]!
+    arm_emit(ctx, stp_instr)
+    // MOV X29, SP = ADD X29, SP, #0
+    let mov_instr = 0x910003FD  // ADD X29, SP, #0
+    arm_emit(ctx, mov_instr)
+    // SUB SP, SP, #0 (placeholder — frame_size patched later)
+    let sub_pos = ctx.code_len
+    let sub_instr = 0xD10003FF  // SUB SP, SP, #0
+    arm_emit(ctx, sub_instr)
+    return sub_pos
+
+// AArch64 epilogue: MOV SP, X29; LDP X29, X30, [SP], #16; RET
+fn arm_emit_epilogue(ctx Ctx)
+    let mov_instr = 0x910003BF  // MOV SP, X29 = ADD SP, X29, #0
+    arm_emit(ctx, mov_instr)
+    let ldp_instr = 0xA8C17BFD  // LDP X29, X30, [SP], #16
+    arm_emit(ctx, ldp_instr)
+    arm_ret(ctx)
+
+// arm_push: STR Xd, [SP, #-16]! (push with 16-byte alignment)
+fn arm_push(ctx Ctx, r int)
+    let instr = 0xF81F0FFF + r - 31 * 32  // STR Xt, [SP, #-16]! (pre-index)
+    // Actually let me recompute: STR (pre-index, 64-bit):
+    // 1111 1000 00 0 imm9 11 Rn Rt
+    // = 0xF8000C00 | (imm9 << 12) | (Rn << 5) | Rt
+    // imm9 = -16 = 0x1F0 (9-bit signed)
+    let instr2 = 0xF8000C00 + (0x1F0 * 4096) + (X31 * 32) + r
+    arm_emit(ctx, instr2)
+
+// arm_pop: LDR Xd, [SP], #16 (pop with 16-byte deallocation)
+fn arm_pop(ctx Ctx, r int)
+    // LDR (post-index) 64-bit: 0xF8400400 | (imm9 << 12) | (Rn << 5) | Rt
+    // imm9 = 16 = 0x010
+    let instr = 0xF8400400 + (16 * 4096) + (X31 * 32) + r
+    arm_emit(ctx, instr)
+
+// arm_patch_branch: patch a B/BL/Bcond placeholder at pos to target
+fn arm_patch_branch(ctx Ctx, pos int, target int)
+    let off = target - pos
+    let instr = ctx.code_data[pos] + (ctx.code_data[pos + 1] * 256) + (ctx.code_data[pos + 2] * 65536) + (ctx.code_data[pos + 3] * 16777216)
+    if (instr & 0xFF000010) == 0x54000000
+        // Bcond: 19-bit offset
+        let off19 = (off / 4) & 524287
+        let new_instr = (instr & 0xFF00001F) + (off19 * 32)
+        ctx.code_data[pos] = new_instr % 256
+        ctx.code_data[pos + 1] = (new_instr / 256) % 256
+        ctx.code_data[pos + 2] = (new_instr / 65536) % 256
+        ctx.code_data[pos + 3] = (new_instr / 16777216) % 256
+    else
+        // B or BL: 26-bit offset
+        let off26 = (off / 4) & 67108863
+        let new_instr = (instr & 0xFC000000) + off26
+        ctx.code_data[pos] = new_instr % 256
+        ctx.code_data[pos + 1] = (new_instr / 256) % 256
+        ctx.code_data[pos + 2] = (new_instr / 65536) % 256
+        ctx.code_data[pos + 3] = (new_instr / 16777216) % 256
+
+// arm_add_fixup: record an ADR fixup for AArch64
+fn arm_add_fixup(ctx Ctx, adr_pos int, data_off int)
+    let idx = ctx.fixup_count
+    ctx.code_data[200000 + idx * 2] = adr_pos
+    ctx.code_data[200000 + idx * 2 + 1] = data_off
+    ctx.fixup_count = idx + 1
+
+// arm_apply_fixups: patch all ADR instructions now that code_len is final
+fn arm_apply_fixups(ctx Ctx)
+    let mut i = 0
+    while i < ctx.fixup_count
+        let adr_pos = ctx.code_data[200000 + i * 2]
+        let data_off = ctx.code_data[200000 + i * 2 + 1]
+        let off = (ctx.code_len + data_off) - adr_pos
+        let immlo = off & 3
+        let immhi = (off >> 2) & 524287
+        // Read existing instruction to get the destination register
+        let old_instr = ctx.code_data[adr_pos] + (ctx.code_data[adr_pos + 1] * 256) + (ctx.code_data[adr_pos + 2] * 65536) + (ctx.code_data[adr_pos + 3] * 16777216)
+        let rd = old_instr & 31
+        let instr = 0x10000000 + (immlo * 536870912) + (immhi * 32) + rd
+        ctx.code_data[adr_pos] = instr % 256
+        ctx.code_data[adr_pos + 1] = (instr / 256) % 256
+        ctx.code_data[adr_pos + 2] = (instr / 65536) % 256
+        ctx.code_data[adr_pos + 3] = (instr / 16777216) % 256
+        i = i + 1
+
+// arm_apply_call_fixups: patch all BL instructions
+fn arm_apply_call_fixups(ctx Ctx)
+    let mut ci = 0
+    while ci < ctx.call_fixup_count
+        let call_pos = ctx.call_fixups[ci * 2]
+        let fn_name = ctx.call_fixups[ci * 2 + 1]
+        if ctx.fn_table.has(fn_name)
+            let fn_start = ctx.fn_table[fn_name]
+            let disp = fn_start - call_pos
+            // BL #offset: 26-bit offset in instruction words
+            let off26 = (disp / 4) & 67108863
+            let instr = 0x94000000 + off26
+            ctx.code_data[call_pos] = instr % 256
+            ctx.code_data[call_pos + 1] = (instr / 256) % 256
+            ctx.code_data[call_pos + 2] = (instr / 65536) % 256
+            ctx.code_data[call_pos + 3] = (instr / 16777216) % 256
+        ci = ci + 1
+
+// ---------------------------------------------------------------------------
+// AArch64 codegen dispatchers
+// ---------------------------------------------------------------------------
+
+fn arm_cg_expr(ctx Ctx, e Node)
+    if e.kind == "int_lit"
+        let val = parse_int(e.sval)
+        arm_mov_imm64(ctx, X0, val)
+        return
+    if e.kind == "bool_true"
+        arm_mov_imm64(ctx, X0, 1)
+        return
+    if e.kind == "bool_false"
+        arm_mov_imm64(ctx, X0, 0)
+        return
+    if e.kind == "nil"
+        arm_mov_imm64(ctx, X0, 0)
+        return
+    if e.kind == "float_lit"
+        let val = parse_int(e.sval)
+        arm_mov_imm64(ctx, X0, val)
+        return
+    if e.kind == "ident"
+        let offset = cg_get_var_offset(ctx, e.sval)
+        arm_ldr_safe(ctx, X0, X29, offset)
+        return
+    if e.kind == "binary"
+        arm_cg_binary(ctx, e)
+        return
+    if e.kind == "unary"
+        arm_cg_unary(ctx, e)
+        return
+    if e.kind == "call"
+        arm_cg_call(ctx, e)
+        return
+    if e.kind == "string_lit"
+        let data_off = ctx.data_len
+        cg_add_string(ctx, e.sval)
+        let adr_pos = ctx.code_len
+        let adr_instr = 0x10000000 + X0  // ADR X0, #0
+        arm_emit(ctx, adr_instr)
+        arm_add_fixup(ctx, adr_pos, data_off)
+        return
+    if e.kind == "if_expr"
+        arm_cg_if_expr(ctx, e)
+        return
+    arm_mov_imm64(ctx, X0, 0)
+
+fn arm_cg_binary(ctx Ctx, e Node)
+    let la = e.a
+    let rb = e.b
+    let op = e.sval
+
+    if op == "and"
+        arm_cg_expr(ctx, la[0])
+        arm_cmp_imm(ctx, X0, 0)
+        let beq_pos = ctx.code_len
+        arm_bcond(ctx, ARM_EQ, 0)
+        arm_cg_expr(ctx, rb[0])
+        arm_cmp_imm(ctx, X0, 0)
+        arm_cset(ctx, X0, ARM_NE)
+        let b_pos = ctx.code_len
+        arm_b(ctx, 0)
+        let false_target = ctx.code_len
+        arm_patch_branch(ctx, beq_pos, false_target)
+        arm_mov_imm64(ctx, X0, 0)
+        let end_target = ctx.code_len
+        arm_patch_branch(ctx, b_pos, end_target)
+        return
+    if op == "or"
+        arm_cg_expr(ctx, la[0])
+        arm_cmp_imm(ctx, X0, 0)
+        let bne_pos = ctx.code_len
+        arm_bcond(ctx, ARM_NE, 0)
+        arm_cg_expr(ctx, rb[0])
+        arm_cmp_imm(ctx, X0, 0)
+        arm_cset(ctx, X0, ARM_NE)
+        let b_pos = ctx.code_len
+        arm_b(ctx, 0)
+        let true_target = ctx.code_len
+        arm_patch_branch(ctx, bne_pos, true_target)
+        arm_mov_imm64(ctx, X0, 1)
+        let end_target = ctx.code_len
+        arm_patch_branch(ctx, b_pos, end_target)
+        return
+
+    // Evaluate left, push, evaluate right, pop into X1
+    arm_cg_expr(ctx, la[0])
+    arm_push(ctx, X0)
+    arm_cg_expr(ctx, rb[0])
+    arm_pop(ctx, X1)
+
+    if op == "+"
+        arm_add(ctx, X0, X1, X0)
+        return
+    if op == "-"
+        arm_sub(ctx, X0, X1, X0)
+        return
+    if op == "*"
+        arm_mul(ctx, X0, X1, X0)
+        return
+    if op == "/"
+        arm_sdiv(ctx, X0, X1, X0)
+        return
+    if op == "%"
+        arm_sdiv(ctx, X2, X1, X0)
+        arm_msub(ctx, X0, X2, X0, X1)
+        return
+    if op == "=="
+        arm_cmp(ctx, X1, X0)
+        arm_cset(ctx, X0, ARM_EQ)
+        return
+    if op == "!="
+        arm_cmp(ctx, X1, X0)
+        arm_cset(ctx, X0, ARM_NE)
+        return
+    if op == "<"
+        arm_cmp(ctx, X1, X0)
+        arm_cset(ctx, X0, ARM_LT)
+        return
+    if op == ">"
+        arm_cmp(ctx, X1, X0)
+        arm_cset(ctx, X0, ARM_GT)
+        return
+    if op == "<="
+        arm_cmp(ctx, X1, X0)
+        arm_cset(ctx, X0, ARM_LE)
+        return
+    if op == ">="
+        arm_cmp(ctx, X1, X0)
+        arm_cset(ctx, X0, ARM_GE)
+        return
+    if op == "&"
+        arm_and(ctx, X0, X1, X0)
+        return
+    if op == "|"
+        arm_orr(ctx, X0, X1, X0)
+        return
+    if op == "^"
+        arm_eor(ctx, X0, X1, X0)
+        return
+    arm_mov_imm64(ctx, X0, 0)
+
+fn arm_cg_unary(ctx Ctx, e Node)
+    let operand = e.a[0]
+    let op = e.sval
+    if op == "-"
+        arm_cg_expr(ctx, operand)
+        arm_sub(ctx, X0, XZR, X0)
+        return
+    if op == "!"
+        arm_cg_expr(ctx, operand)
+        arm_cmp_imm(ctx, X0, 0)
+        arm_cset(ctx, X0, ARM_EQ)
+        return
+    if op == "~"
+        arm_cg_expr(ctx, operand)
+        // MVN X0, X0 = ORN X0, XZR, X0 = 0xAA200000 | (X0 << 16) | (XZR << 5) | X0
+        let instr = 0xAA200000 + (X0 * 65536) + (XZR * 32) + X0
+        arm_emit(ctx, instr)
+        return
+    arm_cg_expr(ctx, operand)
+
+fn arm_cg_call(ctx Ctx, e Node)
+    let fa = e.a
+    if fa[0].kind != "ident"
+        arm_mov_imm64(ctx, X0, 0)
+        return
+    let fn_name = fa[0].sval
+
+    if fn_name == "println"
+        let args = e.list
+        if args.len() > 0
+            let arg = args[0]
+            if arg.kind == "string_lit"
+                arm_cg_print_string_lit(ctx, arg.sval)
+            else
+                if arg.kind == "int_lit"
+                    arm_mov_imm64(ctx, X0, parse_int(arg.sval))
+                    arm_cg_print_int(ctx)
+                else
+                    if arg.kind == "bool_true"
+                        arm_cg_print_string_lit(ctx, "true")
+                    else
+                        if arg.kind == "bool_false"
+                            arm_cg_print_string_lit(ctx, "false")
+                        else
+                            if arg.kind == "ident"
+                                if ctx.var_types.has(arg.sval)
+                                    let vt = ctx.var_types[arg.sval]
+                                    if vt == "str"
+                                        let offset = cg_get_var_offset(ctx, arg.sval)
+                                        arm_ldr_safe(ctx, X0, X29, offset)
+                                        arm_cg_print_string_val(ctx)
+                                    else
+                                        arm_cg_expr(ctx, arg)
+                                        arm_cg_print_int(ctx)
+                                else
+                                    arm_cg_expr(ctx, arg)
+                                    arm_cg_print_int(ctx)
+                            else
+                                arm_cg_expr(ctx, arg)
+                                arm_cg_print_int(ctx)
+        arm_cg_print_string_lit(ctx, "\n")
+        return
+    if fn_name == "print"
+        let args = e.list
+        if args.len() > 0
+            let arg = args[0]
+            if arg.kind == "string_lit"
+                arm_cg_print_string_lit(ctx, arg.sval)
+                return
+            if arg.kind == "int_lit"
+                arm_mov_imm64(ctx, X0, parse_int(arg.sval))
+                arm_cg_print_int(ctx)
+                return
+            if arg.kind == "bool_true"
+                arm_cg_print_string_lit(ctx, "true")
+                return
+            if arg.kind == "bool_false"
+                arm_cg_print_string_lit(ctx, "false")
+                return
+            if arg.kind == "ident"
+                if ctx.var_types.has(arg.sval)
+                    let vt = ctx.var_types[arg.sval]
+                    if vt == "str"
+                        let offset = cg_get_var_offset(ctx, arg.sval)
+                        arm_ldr_safe(ctx, X0, X29, offset)
+                        arm_cg_print_string_val(ctx)
+                        return
+            arm_cg_expr(ctx, arg)
+            arm_cg_print_int(ctx)
+        return
+    if fn_name == "len"
+        let args = e.list
+        if args.len() > 0
+            arm_cg_expr(ctx, args[0])
+            arm_ldr_safe(ctx, X0, X0, 0)
+            return
+        arm_mov_imm64(ctx, X0, 0)
+        return
+
+    // User-defined function call
+    // Evaluate args in REVERSE order so earlier args don't get clobbered.
+    // arg N-1 → X0, MOV X(N-1), X0
+    // arg N-2 → X0, MOV X(N-2), X0
+    // ...
+    // arg 0 → X0 (already in correct register)
+    let args = e.list
+    let nargs = args.len()
+    let mut ai = nargs - 1
+    while ai >= 0 and ai < 8
+        arm_cg_expr(ctx, args[ai])
+        if ai == 1
+            arm_mov(ctx, X1, X0)
+        if ai == 2
+            arm_mov(ctx, X2, X0)
+        if ai == 3
+            arm_mov(ctx, X3, X0)
+        if ai == 4
+            arm_mov(ctx, X4, X0)
+        if ai == 5
+            arm_mov(ctx, X5, X0)
+        if ai == 6
+            arm_mov(ctx, X6, X0)
+        if ai == 7
+            arm_mov(ctx, X7, X0)
+        // ai == 0: arg is already in X0, no move needed
+        ai = ai - 1
+
+    // BL #offset (placeholder — patched later)
+    let bl_pos = ctx.code_len
+    arm_bl(ctx, 0)
+    let cidx = ctx.call_fixup_count
+    ctx.call_fixups[cidx * 2] = bl_pos
+    ctx.call_fixups[cidx * 2 + 1] = fn_name
+    ctx.call_fixup_count = cidx + 1
+
+fn arm_cg_print_string_lit(ctx Ctx, s str)
+    let data_off = ctx.data_len
+    cg_add_string(ctx, s)
+    let adr_pos = ctx.code_len
+    let adr_instr = 0x10000000 + X1
+    arm_emit(ctx, adr_instr)
+    arm_add_fixup(ctx, adr_pos, data_off)
+    arm_add_imm(ctx, X1, X1, 8)
+    arm_mov_imm64(ctx, X2, s.len())
+    arm_mov_imm64(ctx, X0, 1)
+    arm_mov_imm64(ctx, X8, 64)
+    arm_svc(ctx)
+
+fn arm_cg_print_string_val(ctx Ctx)
+    arm_mov(ctx, X19, X0)
+    arm_ldr_safe(ctx, X2, X19, 0)
+    arm_add_imm(ctx, X1, X19, 8)
+    arm_mov_imm64(ctx, X0, 1)
+    arm_mov_imm64(ctx, X8, 64)
+    arm_svc(ctx)
+
+fn arm_cg_print_int(ctx Ctx)
+    // Push callee-saved registers we use
+    arm_push(ctx, X19)
+    arm_push(ctx, X20)
+    arm_push(ctx, X21)
+    arm_push(ctx, X22)
+    arm_push(ctx, X23)
+    arm_push(ctx, X24)
+
+    // Allocate 32-byte buffer on stack
+    arm_sub_imm(ctx, X31, X31, 32)
+    arm_mov(ctx, X20, X31)
+
+    // Save X0 in X19
+    arm_mov(ctx, X19, X0)
+
+    // if X0 == 0 → write "0"
+    arm_cmp_imm(ctx, X19, 0)
+    let beq_zero_pos = ctx.code_len
+    arm_bcond(ctx, ARM_EQ, 0)
+
+    // Check sign: if X19 < 0, write '-' and negate
+    arm_cmp_imm(ctx, X19, 0)
+    let bpl_neg_pos = ctx.code_len
+    arm_bcond(ctx, ARM_PL, 0)
+
+    // Write '-' character
+    arm_mov_imm64(ctx, X9, 45)
+    // STRB W9, [X20]
+    let strb_instr = 0x39000000 + (X20 * 32) + X9
+    arm_emit(ctx, strb_instr)
+    arm_mov_imm64(ctx, X0, 1)
+    arm_mov(ctx, X1, X20)
+    arm_mov_imm64(ctx, X2, 1)
+    arm_mov_imm64(ctx, X8, 64)
+    arm_svc(ctx)
+    // Negate X19
+    arm_sub(ctx, X19, XZR, X19)
+
+    let not_neg_target = ctx.code_len
+    arm_patch_branch(ctx, bpl_neg_pos, not_neg_target)
+
+    // X21 = 0 (digit count)
+    arm_mov_imm64(ctx, X21, 0)
+
+    let digit_loop = ctx.code_len
+    arm_cmp_imm(ctx, X19, 0)
+    let beq_done_pos = ctx.code_len
+    arm_bcond(ctx, ARM_EQ, 0)
+
+    // X9 = X19 % 10; X19 = X19 / 10
+    arm_mov_imm64(ctx, X11, 10)
+    arm_sdiv(ctx, X10, X19, X11)
+    arm_msub(ctx, X9, X10, X11, X19)
+    arm_mov(ctx, X19, X10)
+
+    // digit_char = X9 + '0'
+    arm_add_imm(ctx, X9, X9, 48)
+    // STRB W9, [X20, X21]
+    let strb_idx_instr = 0x38200800 + (X21 * 65536) + (X20 * 32) + X9
+    arm_emit(ctx, strb_idx_instr)
+    arm_add_imm(ctx, X21, X21, 1)
+    let b_loop_pos = ctx.code_len
+    arm_b(ctx, 0)
+    arm_patch_branch(ctx, b_loop_pos, digit_loop)
+
+    let done_target = ctx.code_len
+    arm_patch_branch(ctx, beq_done_pos, done_target)
+
+    // Reverse digits into second buffer
+    arm_sub_imm(ctx, X31, X31, 32)
+    arm_mov(ctx, X22, X31)
+
+    arm_mov_imm64(ctx, X23, 0)
+    arm_sub_imm(ctx, X24, X21, 1)
+
+    let rev_loop = ctx.code_len
+    arm_cmp(ctx, X23, X21)
+    let beq_rev_done_pos = ctx.code_len
+    arm_bcond(ctx, ARM_EQ, 0)
+
+    // LDRB W9, [X20, X24]
+    let ldrb_idx_instr = 0x38600800 + (X24 * 65536) + (X20 * 32) + X9
+    arm_emit(ctx, ldrb_idx_instr)
+    // STRB W9, [X22, X23]
+    let strb_out_instr = 0x38200800 + (X23 * 65536) + (X22 * 32) + X9
+    arm_emit(ctx, strb_out_instr)
+
+    arm_add_imm(ctx, X23, X23, 1)
+    arm_sub_imm(ctx, X24, X24, 1)
+    let b_rev_pos = ctx.code_len
+    arm_b(ctx, 0)
+    arm_patch_branch(ctx, b_rev_pos, rev_loop)
+
+    let rev_done_target = ctx.code_len
+    arm_patch_branch(ctx, beq_rev_done_pos, rev_done_target)
+
+    // Write X23 bytes from X22
+    arm_mov_imm64(ctx, X0, 1)
+    arm_mov(ctx, X1, X22)
+    arm_mov(ctx, X2, X23)
+    arm_mov_imm64(ctx, X8, 64)
+    arm_svc(ctx)
+
+    // Deallocate 64 bytes (both buffers)
+    arm_add_imm(ctx, X31, X31, 64)
+    let b_past_zero_pos = ctx.code_len
+    arm_b(ctx, 0)
+
+    // zero_case: write "0"
+    let zero_target = ctx.code_len
+    arm_patch_branch(ctx, beq_zero_pos, zero_target)
+    let zdata_off = ctx.data_len
+    cg_add_string(ctx, "0")
+    let zadr_pos = ctx.code_len
+    let zadr_instr = 0x10000000 + X1
+    arm_emit(ctx, zadr_instr)
+    arm_add_fixup(ctx, zadr_pos, zdata_off)
+    arm_add_imm(ctx, X1, X1, 8)
+    arm_mov_imm64(ctx, X2, 1)
+    arm_mov_imm64(ctx, X0, 1)
+    arm_mov_imm64(ctx, X8, 64)
+    arm_svc(ctx)
+    // Deallocate buffer
+    arm_add_imm(ctx, X31, X31, 32)
+
+    let past_zero_target = ctx.code_len
+    arm_patch_branch(ctx, b_past_zero_pos, past_zero_target)
+
+    // Pop callee-saved registers
+    arm_pop(ctx, X24)
+    arm_pop(ctx, X23)
+    arm_pop(ctx, X22)
+    arm_pop(ctx, X21)
+    arm_pop(ctx, X20)
+    arm_pop(ctx, X19)
+
+fn arm_cg_if_expr(ctx Ctx, e Node)
+    arm_mov_imm64(ctx, X0, 0)
+
+// ---------------------------------------------------------------------------
+// AArch64 statement codegen
+// ---------------------------------------------------------------------------
+
+fn arm_cg_stmt(ctx Ctx, s Node)
+    if s.kind == "let_stmt"
+        let va = s.a
+        let init = va[0]
+        if init.kind == "string_lit"
+            ctx.var_types[s.sval] = "str"
+        if init.kind == "int_lit"
+            ctx.var_types[s.sval] = "int"
+        if init.kind == "bool_true"
+            ctx.var_types[s.sval] = "bool"
+        if init.kind == "bool_false"
+            ctx.var_types[s.sval] = "bool"
+        if init.kind == "ident"
+            if ctx.var_types.has(init.sval)
+                ctx.var_types[s.sval] = ctx.var_types[init.sval]
+        if init.kind == "call"
+            let fa = init.a
+            if fa[0].kind == "ident"
+                let fname = fa[0].sval
+                if ctx.fn_ret_types.has(fname)
+                    let rt = ctx.fn_ret_types[fname]
+                    if rt == "str"
+                        ctx.var_types[s.sval] = "str"
+                    if rt == "int"
+                        ctx.var_types[s.sval] = "int"
+                    if rt == "bool"
+                        ctx.var_types[s.sval] = "bool"
+        arm_cg_expr(ctx, init)
+        let offset = cg_get_var_offset(ctx, s.sval)
+        arm_str_safe(ctx, X0, X29, offset)
+        return
+    if s.kind == "return"
+        if s.a.has(0)
+            let va = s.a
+            arm_cg_expr(ctx, va[0])
+        if ctx.is_main
+            if not s.a.has(0)
+                arm_mov_imm64(ctx, X0, 0)
+            arm_mov_imm64(ctx, X8, 93)
+            arm_svc(ctx)
+        else
+            arm_emit_epilogue(ctx)
+        return
+    if s.kind == "expr_stmt"
+        let ea = s.a
+        arm_cg_expr(ctx, ea[0])
+        return
+    if s.kind == "assign"
+        let ea = s.a
+        let vb = s.b
+        let target = ea[0]
+        if target.kind == "ident"
+            arm_cg_expr(ctx, vb[0])
+            let offset = cg_get_var_offset(ctx, target.sval)
+            arm_str_safe(ctx, X0, X29, offset)
+            return
+        arm_cg_expr(ctx, vb[0])
+        return
+    if s.kind == "if_stmt"
+        arm_cg_if(ctx, s)
+        return
+    if s.kind == "while_stmt"
+        arm_cg_while(ctx, s)
+        return
+    if s.kind == "for_stmt"
+        if s.bval
+            arm_cg_for_range(ctx, s)
+        return
+    if s.kind == "assert_stmt"
+        let ea = s.a
+        arm_cg_expr(ctx, ea[0])
+        return
+
+fn arm_cg_if(ctx Ctx, s Node)
+    // if_stmt structure (matches x86_64 cg_if):
+    //   s.list = list of branch nodes (branch 0 = if, branch 1+ = but/else-if)
+    //   s.a = else block (may be empty)
+    // Each branch node has:
+    //   b.a = {0: condition expr}
+    //   b.b = block (table of statements)
+    let branches = s.list
+    let mut end_jumps = {}
+    let mut njumps = 0
+    let mut bi = 0
+    while bi < branches.len()
+        let b = branches[bi]
+        let ca = b.a
+        arm_cg_expr(ctx, ca[0])
+        arm_cmp_imm(ctx, X0, 0)
+        let beq_next_pos = ctx.code_len
+        arm_bcond(ctx, ARM_EQ, 0)
+        // Then-block
+        let block = b.b
+        let mut si = 0
+        while si < block.len()
+            arm_cg_stmt(ctx, block[si])
+            si = si + 1
+        // JMP to end
+        let b_end_pos = ctx.code_len
+        arm_b(ctx, 0)
+        end_jumps[njumps] = b_end_pos
+        njumps = njumps + 1
+        // Next branch / else starts here
+        let next_target = ctx.code_len
+        arm_patch_branch(ctx, beq_next_pos, next_target)
+        bi = bi + 1
+    // Else block (if any)
+    if s.a.has(0)
+        let eb = s.a
+        let else_block = eb[0].list
+        let mut j = 0
+        while j < else_block.len()
+            arm_cg_stmt(ctx, else_block[j])
+            j = j + 1
+    // Patch all end jumps to here
+    let end_target = ctx.code_len
+    let mut ji = 0
+    while ji < njumps
+        let jmp_pos = end_jumps[ji]
+        arm_patch_branch(ctx, jmp_pos, end_target)
+        ji = ji + 1
+
+fn arm_cg_while(ctx Ctx, s Node)
+    let ea = s.a
+    let cond = ea[0]
+    let loop_start = ctx.code_len
+    arm_cg_expr(ctx, cond)
+    arm_cmp_imm(ctx, X0, 0)
+    let beq_end_pos = ctx.code_len
+    arm_bcond(ctx, ARM_EQ, 0)
+    let ld = ctx.loop_depth
+    ctx.continue_targets[ld] = loop_start
+    ctx.break_targets[ld] = beq_end_pos
+    ctx.loop_depth = ld + 1
+    let body = s.list
+    let mut i = 0
+    while i < body.len()
+        arm_cg_stmt(ctx, body[i])
+        i = i + 1
+    ctx.loop_depth = ld
+    let b_loop_pos = ctx.code_len
+    arm_b(ctx, 0)
+    arm_patch_branch(ctx, b_loop_pos, loop_start)
+    let end_target = ctx.code_len
+    arm_patch_branch(ctx, beq_end_pos, end_target)
+
+fn arm_cg_for_range(ctx Ctx, s Node)
+    let ea = s.a
+    let range_node = ea[0]
+    let i_offset = cg_get_var_offset(ctx, s.sval)
+    if range_node.a.has(0)
+        let ra = range_node.a
+        arm_cg_expr(ctx, ra[0])
+    else
+        arm_mov_imm64(ctx, X0, 0)
+    arm_str_safe(ctx, X0, X29, i_offset)
+
+    let loop_start = ctx.code_len
+    arm_ldr_safe(ctx, X0, X29, i_offset)
+    if range_node.b.has(0)
+        let rb = range_node.b
+        arm_cg_expr(ctx, rb[0])
+    else
+        arm_mov_imm64(ctx, X0, 0)
+    arm_mov(ctx, X1, X0)
+    arm_ldr_safe(ctx, X0, X29, i_offset)
+    arm_cmp(ctx, X0, X1)
+    let bge_end_pos = ctx.code_len
+    arm_bcond(ctx, ARM_GE, 0)
+
+    let ld = ctx.loop_depth
+    ctx.continue_targets[ld] = loop_start
+    ctx.break_targets[ld] = bge_end_pos
+    ctx.loop_depth = ld + 1
+    let body = s.list
+    let mut i = 0
+    while i < body.len()
+        arm_cg_stmt(ctx, body[i])
+        i = i + 1
+    ctx.loop_depth = ld
+
+    arm_ldr_safe(ctx, X0, X29, i_offset)
+    arm_add_imm(ctx, X0, X0, 1)
+    arm_str_safe(ctx, X0, X29, i_offset)
+    let b_loop_pos = ctx.code_len
+    arm_b(ctx, 0)
+    arm_patch_branch(ctx, b_loop_pos, loop_start)
+    let end_target = ctx.code_len
+    arm_patch_branch(ctx, bge_end_pos, end_target)
+
+// ---------------------------------------------------------------------------
+// AArch64 function codegen
+// ---------------------------------------------------------------------------
+
+fn arm_cg_function(ctx Ctx, fn_decl Node, is_main bool)
+    let fn_start = ctx.code_len
+    let fn_name = fn_decl.sval
+    ctx.fn_table[fn_name] = fn_start
+    ctx.fn_count = ctx.fn_count + 1
+    ctx.var_slots = {}
+    ctx.next_slot = -8
+    ctx.var_types = {}
+
+    let sub_pos = arm_emit_prologue(ctx)
+
+    let params = fn_decl.a
+    let mut pi = 0
+    while pi < params.len() and pi < 8
+        let param = params[pi]
+        let local_offset = cg_get_var_offset(ctx, param.sval)
+        arm_str_safe(ctx, pi, X29, local_offset)
+        ctx.var_types[param.sval] = param.extra
+        pi = pi + 1
+
+    ctx.is_main = is_main
+    let body = fn_decl.list
+    let mut i = 0
+    while i < body.len()
+        arm_cg_stmt(ctx, body[i])
+        i = i + 1
+
+    if is_main
+        arm_mov_imm64(ctx, X0, 0)
+        arm_mov_imm64(ctx, X8, 93)
+        arm_svc(ctx)
+    else
+        arm_mov_imm64(ctx, X0, 0)
+        arm_emit_epilogue(ctx)
+
+    // Patch frame size in the SUB SP, SP, #0 instruction
+    let frame_size = 0 - ctx.next_slot - 8
+    let mut aligned_frame = frame_size
+    if aligned_frame % 16 != 0
+        aligned_frame = aligned_frame + (16 - (aligned_frame % 16))
+    if aligned_frame > 0 and aligned_frame < 4096
+        let instr = 0xD10003FF + ((aligned_frame & 4095) * 1024)
+        ctx.code_data[sub_pos] = instr % 256
+        ctx.code_data[sub_pos + 1] = (instr / 256) % 256
+        ctx.code_data[sub_pos + 2] = (instr / 65536) % 256
+        ctx.code_data[sub_pos + 3] = (instr / 16777216) % 256
