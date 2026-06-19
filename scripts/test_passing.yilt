@@ -1,0 +1,11 @@
+struct S
+    x int
+
+fn setx(s2 S, v int)
+    s2.x = v
+
+fn main() int
+    let mut s = S{x: 0}
+    setx(s, 5)
+    print(s.x)
+    return 0

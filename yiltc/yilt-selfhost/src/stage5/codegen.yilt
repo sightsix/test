@@ -494,9 +494,12 @@ fn build_elf(ctx Ctx, output_fd int) int
     // e_type (2 bytes) = ET_EXEC = 2
     write_byte(output_fd, 2)
     write_byte(output_fd, 0)
-    // e_machine (2 bytes): EM_X86_64=62, EM_AARCH64=183
+    // e_machine (2 bytes): EM_X86_64=62, EM_AARCH64=183, EM_RISCV=243
     if ctx.target == 1
         write_byte(output_fd, 183)
+        write_byte(output_fd, 0)
+    if ctx.target == 2
+        write_byte(output_fd, 243)
         write_byte(output_fd, 0)
     if ctx.target == 0
         write_byte(output_fd, 62)
@@ -614,6 +617,10 @@ fn cg_expr(ctx Ctx, e Node)
     // Multi-target dispatch: AArch64 path
     if ctx.target == 1
         arm_cg_expr(ctx, e)
+        return
+    // Multi-target dispatch: RV64 path
+    if ctx.target == 2
+        rv_cg_expr(ctx, e)
         return
     if e.kind == "int_lit"
         let val = parse_int(e.sval)
@@ -1549,6 +1556,10 @@ fn cg_stmt(ctx Ctx, s Node)
     if ctx.target == 1
         arm_cg_stmt(ctx, s)
         return
+    // Multi-target dispatch: RV64 path
+    if ctx.target == 2
+        rv_cg_stmt(ctx, s)
+        return
     if s.kind == "let_stmt"
         let va = s.a
         let init = va[0]
@@ -1949,6 +1960,10 @@ fn cg_function(ctx Ctx, fn_decl Node, is_main bool)
     if ctx.target == 1
         arm_cg_function(ctx, fn_decl, is_main)
         return
+    // Multi-target dispatch: RV64 path
+    if ctx.target == 2
+        rv_cg_function(ctx, fn_decl, is_main)
+        return
     // Record function start offset
     let fn_start = ctx.code_len
     let fn_name = fn_decl.sval
@@ -2015,13 +2030,18 @@ fn compile_program(src str, output_path str) int
     let decls = result.decls
     let ctx = ctx_new()
 
-    // Multi-target selection: check for a target marker file.
-    // If /tmp/yilt_target_arm64 exists, target = AArch64 (1).
-    // Otherwise, target = x86_64 (0).
+    // Multi-target selection: check for marker files.
+    // /tmp/yilt_target_arm64 → AArch64 (target=1)
+    // /tmp/yilt_target_rv64  → RISC-V 64 (target=2)
+    // Otherwise → x86_64 (target=0)
     let target_fd = sys.open("/tmp/yilt_target_arm64", 0, 0)
     if target_fd >= 0
         sys.close(target_fd)
         ctx.target = 1
+    let target_fd2 = sys.open("/tmp/yilt_target_rv64", 0, 0)
+    if target_fd2 >= 0
+        sys.close(target_fd2)
+        ctx.target = 2
 
     // Pre-scan: record function return types for type dispatch in print.
     let mut i = 0
@@ -2057,22 +2077,30 @@ fn compile_program(src str, output_path str) int
             arm_mov_imm64(ctx, X8, 93)
             arm_svc(ctx)
         else
-            cg_apply_fixups(ctx)
-            let mut ci = 0
-            while ci < ctx.call_fixup_count
-                let call_pos = ctx.call_fixups[ci * 2]
-                let fn_name = ctx.call_fixups[ci * 2 + 1]
-                if ctx.fn_table.has(fn_name)
-                    let fn_start = ctx.fn_table[fn_name]
-                    let disp = fn_start - (call_pos + 4)
-                    ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
-                    ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
-                    ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
-                    ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
-                ci = ci + 1
-            emit_mov_r64_imm64(ctx, RAX, 60)
-            emit_mov_r64_imm64(ctx, RDI, 0)
-            emit_syscall(ctx)
+            if ctx.target == 2
+                rv_apply_fixups(ctx)
+                rv_apply_call_fixups(ctx)
+                // Exit syscall for RV64
+                rv_li(ctx, RV_A0, 0)
+                rv_li(ctx, RV_A7, 93)
+                rv_ecall(ctx)
+            else
+                cg_apply_fixups(ctx)
+                let mut ci = 0
+                while ci < ctx.call_fixup_count
+                    let call_pos = ctx.call_fixups[ci * 2]
+                    let fn_name = ctx.call_fixups[ci * 2 + 1]
+                    if ctx.fn_table.has(fn_name)
+                        let fn_start = ctx.fn_table[fn_name]
+                        let disp = fn_start - (call_pos + 4)
+                        ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
+                        ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
+                        ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
+                        ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
+                    ci = ci + 1
+                emit_mov_r64_imm64(ctx, RAX, 60)
+                emit_mov_r64_imm64(ctx, RDI, 0)
+                emit_syscall(ctx)
         let fd = sys.open(output_path, 577, 511)
         if fd < 0
             print("Cannot open output file")
@@ -2104,22 +2132,27 @@ fn compile_program(src str, output_path str) int
         arm_apply_fixups(ctx)
         arm_apply_call_fixups(ctx)
     else
-        // x86_64: apply string LEA fixups
-        cg_apply_fixups(ctx)
+        if ctx.target == 2
+            // RV64: apply AUIPC+ADDI and JAL fixups
+            rv_apply_fixups(ctx)
+            rv_apply_call_fixups(ctx)
+        else
+            // x86_64: apply string LEA fixups
+            cg_apply_fixups(ctx)
 
-        // Apply call fixups: patch CALL displacements
-        let mut ci = 0
-        while ci < ctx.call_fixup_count
-            let call_pos = ctx.call_fixups[ci * 2]
-            let fn_name = ctx.call_fixups[ci * 2 + 1]
-            if ctx.fn_table.has(fn_name)
-                let fn_start = ctx.fn_table[fn_name]
-                let disp = fn_start - (call_pos + 4)
-                ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
-                ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
-                ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
-                ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
-            ci = ci + 1
+            // Apply call fixups: patch CALL displacements
+            let mut ci = 0
+            while ci < ctx.call_fixup_count
+                let call_pos = ctx.call_fixups[ci * 2]
+                let fn_name = ctx.call_fixups[ci * 2 + 1]
+                if ctx.fn_table.has(fn_name)
+                    let fn_start = ctx.fn_table[fn_name]
+                    let disp = fn_start - (call_pos + 4)
+                    ctx.code_data[call_pos] = ((disp % 256) + 256) % 256
+                    ctx.code_data[call_pos + 1] = (((disp / 256) % 256) + 256) % 256
+                    ctx.code_data[call_pos + 2] = (((disp / 65536) % 256) + 256) % 256
+                    ctx.code_data[call_pos + 3] = (((disp / 16777216) % 256) + 256) % 256
+                ci = ci + 1
 
     let fd = sys.open(output_path, 577, 511)
     if fd < 0
@@ -3393,3 +3426,1213 @@ fn arm_cg_function(ctx Ctx, fn_decl Node, is_main bool)
         ctx.code_data[sub_pos + 1] = (instr / 256) % 256
         ctx.code_data[sub_pos + 2] = (instr / 65536) % 256
         ctx.code_data[sub_pos + 3] = (instr / 16777216) % 256
+// ===========================================================================
+// RISC-V 64-bit (RV64) codegen — parallel path activated when ctx.target == 2
+// ===========================================================================
+// Mirrors the AArch64/x86_64 paths but emits RV64I+M instructions.
+//
+// LP64 ABI:
+//   x10-x17 = a0-a7 (function args / return values)
+//   x1 = ra (return address), x2 = sp, x8 = s0/fp, x0 = zero
+//   x5-x7,x28-x31 = t0-t6 (caller-saved temps)
+//   x9,x18-x27 = s1-s11 (callee-saved)
+//
+// Syscall convention (Linux RV64):
+//   a7 = syscall number, a0-a5 = args, a0 = return value
+//   write = 64, exit = 93, exit_group = 94
+//
+// Frame layout (per function):
+//   Prologue: ADDI sp, sp, -frame_size ; SD ra, [sp, frame_size-8] ; SD s0, [sp, frame_size-16]
+//             ADDI s0, sp, frame_size
+//   Epilogue: LD ra, [sp, frame_size-8] ; LD s0, [sp, frame_size-16] ; ADDI sp, sp, frame_size ; RET
+//
+// Local variables at s0-relative negative offsets (same convention as x86_64).
+// ===========================================================================
+
+// RV64 register numbers
+let RV_ZERO = 0  // x0 - hardwired zero
+let RV_RA = 1    // x1 - return address
+let RV_SP = 2    // x2 - stack pointer
+let RV_FP = 8    // x8 - frame pointer (s0)
+let RV_A0 = 10
+let RV_A1 = 11
+let RV_A2 = 12
+let RV_A3 = 13
+let RV_A4 = 14
+let RV_A5 = 15
+let RV_A6 = 16
+let RV_A7 = 17
+let RV_T0 = 5
+let RV_T1 = 6
+let RV_T2 = 7
+let RV_T3 = 28
+let RV_T4 = 29
+let RV_T5 = 30
+let RV_T6 = 31
+let RV_S1 = 9
+let RV_S2 = 18
+let RV_S3 = 19
+let RV_S4 = 20
+let RV_S5 = 21
+let RV_S6 = 22
+let RV_S7 = 23
+let RV_S8 = 24
+let RV_S9 = 25
+let RV_S10 = 26
+let RV_S11 = 27
+
+// RV64 opcodes
+let RV_OP_OP_IMM = 0x13    // ADDI, SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI, SRAI
+let RV_OP_OP = 0x33        // R-format: ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND, MUL, DIV, REM
+let RV_OP_LOAD = 0x03      // LB, LH, LW, LD, LBU, LHU, LWU
+let RV_OP_STORE = 0x23     // SB, SH, SW, SD
+let RV_OP_BRANCH = 0x63    // BEQ, BNE, BLT, BGE, BLTU, BGEU
+let RV_OP_JAL = 0x6F       // JAL
+let RV_OP_JALR = 0x67      // JALR
+let RV_OP_LUI = 0x37       // LUI
+let RV_OP_AUIPC = 0x17     // AUIPC
+let RV_OP_SYSTEM = 0x73    // ECALL, EBREAK
+
+// funct3 for OP-IMM
+let RV_F3_ADDI = 0
+let RV_F3_SLTI = 2
+let RV_F3_SLTIU = 3
+let RV_F3_XORI = 4
+let RV_F3_ORI = 6
+let RV_F3_ANDI = 7
+let RV_F3_SLLI = 1
+let RV_F3_SRLI_SRAI = 5
+
+// funct3 for OP
+let RV_F3_ADD_SUB = 0
+let RV_F3_SLL = 1
+let RV_F3_SLT = 2
+let RV_F3_SLTU = 3
+let RV_F3_XOR = 4
+let RV_F3_SRL_SRA = 5
+let RV_F3_OR = 6
+let RV_F3_AND = 7
+let RV_F3_MUL = 0    // M extension
+let RV_F3_DIV = 4
+let RV_F3_REM = 6
+
+// funct7 for OP
+let RV_F7_ADD = 0x00
+let RV_F7_SUB = 0x20
+let RV_F7_SRL = 0x00
+let RV_F7_SRA = 0x20
+let RV_F7_MULDIV = 0x01
+
+// funct3 for LOAD
+let RV_F3_LD = 3   // 64-bit load
+
+// funct3 for STORE
+let RV_F3_SD = 3   // 64-bit store
+let RV_F3_SB = 0   // byte store
+let RV_F3_LB = 0   // byte load (signed)
+let RV_F3_LBU = 4  // byte load (unsigned)
+
+// funct3 for BRANCH
+let RV_F3_BEQ = 0
+let RV_F3_BNE = 1
+let RV_F3_BLT = 4
+let RV_F3_BGE = 5
+let RV_F3_BLTU = 6
+let RV_F3_BGEU = 7
+
+// ---------------------------------------------------------------------------
+// Instruction encoders (4 formats: R, I, S, B, U, J)
+// ---------------------------------------------------------------------------
+
+// rv_emit: emit a 32-bit RV64 instruction (little-endian)
+fn rv_emit(ctx Ctx, instr int)
+    code_byte(ctx, instr % 256)
+    code_byte(ctx, (instr / 256) % 256)
+    code_byte(ctx, (instr / 65536) % 256)
+    code_byte(ctx, (instr / 16777216) % 256)
+
+// Sign-extend an N-bit value to 64-bit (Yilt ints are 64-bit signed)
+fn rv_sign_extend(v int, bits int) int
+    let mut val = v
+    let mut sign_bit = 1
+    let mut i = 1
+    while i < bits
+        sign_bit = sign_bit * 2
+        i = i + 1
+    if (val & sign_bit) != 0
+        // Negative: sign-extend by setting higher bits
+        let mask = 0 - sign_bit * 2  // all 1s above the sign bit
+        val = val | mask
+    return val
+
+// Mask off the lower N bits
+fn rv_mask_lo(v int, bits int) int
+    let mut mask = 1
+    let mut i = 1
+    while i < bits
+        mask = mask * 2 + 1
+        i = i + 1
+    return v & mask
+
+// R-format encoder: [funct7:7 | rs2:5 | rs1:5 | funct3:3 | rd:5 | opcode:7]
+fn rv_enc_r(opcode int, rd int, funct3 int, rs1 int, rs2 int, funct7 int) int
+    let instr = (funct7 * 33554432) + (rs2 * 1048576) + (rs1 * 32768) + (funct3 * 4096) + (rd * 128) + opcode
+    return instr
+
+// I-format encoder: [imm:12 | rs1:5 | funct3:3 | rd:5 | opcode:7]
+fn rv_enc_i(opcode int, rd int, funct3 int, rs1 int, imm int) int
+    let imm12 = imm & 4095
+    let instr = (imm12 * 1048576) + (rs1 * 32768) + (funct3 * 4096) + (rd * 128) + opcode
+    return instr
+
+// S-format encoder: [imm[11:5]:7 | rs2:5 | rs1:5 | funct3:3 | imm[4:0]:5 | opcode:7]
+fn rv_enc_s(opcode int, funct3 int, rs1 int, rs2 int, imm int) int
+    let imm_hi = (imm >> 5) & 127
+    let imm_lo = imm & 31
+    let instr = (imm_hi * 33554432) + (rs2 * 1048576) + (rs1 * 32768) + (funct3 * 4096) + (imm_lo * 128) + opcode
+    return instr
+
+// B-format encoder: [imm[12]:1 | imm[10:5]:6 | rs2:5 | rs1:5 | funct3:3 | imm[4:1]:4 | imm[11]:1 | opcode:7]
+// Imm is in BYTES (must be even), encoded as 13-bit signed (imm[12:1], bit 0 always 0)
+fn rv_enc_b(opcode int, funct3 int, rs1 int, rs2 int, imm int) int
+    let bit12 = (imm >> 12) & 1
+    let bits10to5 = (imm >> 5) & 63
+    let bit11 = (imm >> 11) & 1
+    let bits4to1 = (imm >> 1) & 15
+    let instr = (bit12 * 2147483648) + (bits10to5 * 33554432) + (rs2 * 1048576) + (rs1 * 32768) + (funct3 * 4096) + (bits4to1 * 256) + (bit11 * 128) + opcode
+    return instr
+
+// U-format encoder: [imm[31:12]:20 | rd:5 | opcode:7]
+fn rv_enc_u(opcode int, rd int, imm int) int
+    let imm20 = (imm >> 12) & 1048575
+    let instr = (imm20 * 4096) + (rd * 128) + opcode
+    return instr
+
+// J-format encoder: [imm[20]:1 | imm[10:1]:10 | imm[11]:1 | imm[19:12]:8 | rd:5 | opcode:7]
+// Imm is in BYTES (must be even), encoded as 21-bit signed
+fn rv_enc_j(opcode int, rd int, imm int) int
+    let bit20 = (imm >> 20) & 1
+    let bits10to1 = (imm >> 1) & 1023
+    let bit11 = (imm >> 11) & 1
+    let bits19to12 = (imm >> 12) & 255
+    let instr = (bit20 * 2147483648) + (bits10to1 * 2097152) + (bit11 * 1048576) + (bits19to12 * 4096) + (rd * 128) + opcode
+    return instr
+
+// ---------------------------------------------------------------------------
+// Individual RV64 instructions
+// ---------------------------------------------------------------------------
+
+// ADDI rd, rs1, imm
+fn rv_addi(ctx Ctx, rd int, rs1 int, imm int)
+    rv_emit(ctx, rv_enc_i(RV_OP_OP_IMM, rd, RV_F3_ADDI, rs1, imm))
+
+// ADD rd, rs1, rs2
+fn rv_add(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_ADD_SUB, rs1, rs2, RV_F7_ADD))
+
+// SUB rd, rs1, rs2
+fn rv_sub(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_ADD_SUB, rs1, rs2, RV_F7_SUB))
+
+// MUL rd, rs1, rs2 (M extension)
+fn rv_mul(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_MUL, rs1, rs2, RV_F7_MULDIV))
+
+// DIV rd, rs1, rs2 (signed)
+fn rv_div(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_DIV, rs1, rs2, RV_F7_MULDIV))
+
+// REM rd, rs1, rs2 (signed modulo)
+fn rv_rem(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_REM, rs1, rs2, RV_F7_MULDIV))
+
+// AND rd, rs1, rs2
+fn rv_and(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_AND, rs1, rs2, RV_F7_ADD))
+
+// OR rd, rs1, rs2
+fn rv_or(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_OR, rs1, rs2, RV_F7_ADD))
+
+// XOR rd, rs1, rs2
+fn rv_xor(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_XOR, rs1, rs2, RV_F7_ADD))
+
+// SLL rd, rs1, rs2 (shift left logical)
+fn rv_sll(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_SLL, rs1, rs2, RV_F7_ADD))
+
+// SRL rd, rs1, rs2 (shift right logical)
+fn rv_srl(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_SRL_SRA, rs1, rs2, RV_F7_SRL))
+
+// SRA rd, rs1, rs2 (shift right arithmetic)
+fn rv_sra(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_SRL_SRA, rs1, rs2, RV_F7_SRA))
+
+// SLT rd, rs1, rs2 (set less than, signed)
+fn rv_slt(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_SLT, rs1, rs2, RV_F7_ADD))
+
+// SLTU rd, rs1, rs2 (set less than, unsigned)
+fn rv_sltu(ctx Ctx, rd int, rs1 int, rs2 int)
+    rv_emit(ctx, rv_enc_r(RV_OP_OP, rd, RV_F3_SLTU, rs1, rs2, RV_F7_ADD))
+
+// LD rd, [rs1, offset]
+fn rv_ld(ctx Ctx, rd int, rs1 int, offset int)
+    rv_emit(ctx, rv_enc_i(RV_OP_LOAD, rd, RV_F3_LD, rs1, offset))
+
+// SD rs2, [rs1, offset]
+fn rv_sd(ctx Ctx, rs2 int, rs1 int, offset int)
+    rv_emit(ctx, rv_enc_s(RV_OP_STORE, RV_F3_SD, rs1, rs2, offset))
+
+// LBU rd, [rs1, offset] (load byte unsigned)
+fn rv_lbu(ctx Ctx, rd int, rs1 int, offset int)
+    rv_emit(ctx, rv_enc_i(RV_OP_LOAD, rd, RV_F3_LBU, rs1, offset))
+
+// SB rs2, [rs1, offset] (store byte)
+fn rv_sb(ctx Ctx, rs2 int, rs1 int, offset int)
+    rv_emit(ctx, rv_enc_s(RV_OP_STORE, RV_F3_SB, rs1, rs2, offset))
+
+// BEQ rs1, rs2, offset
+fn rv_beq(ctx Ctx, rs1 int, rs2 int, offset int)
+    rv_emit(ctx, rv_enc_b(RV_OP_BRANCH, RV_F3_BEQ, rs1, rs2, offset))
+
+// BNE rs1, rs2, offset
+fn rv_bne(ctx Ctx, rs1 int, rs2 int, offset int)
+    rv_emit(ctx, rv_enc_b(RV_OP_BRANCH, RV_F3_BNE, rs1, rs2, offset))
+
+// BLT rs1, rs2, offset (signed)
+fn rv_blt(ctx Ctx, rs1 int, rs2 int, offset int)
+    rv_emit(ctx, rv_enc_b(RV_OP_BRANCH, RV_F3_BLT, rs1, rs2, offset))
+
+// BGE rs1, rs2, offset (signed)
+fn rv_bge(ctx Ctx, rs1 int, rs2 int, offset int)
+    rv_emit(ctx, rv_enc_b(RV_OP_BRANCH, RV_F3_BGE, rs1, rs2, offset))
+
+// JAL rd, offset
+fn rv_jal(ctx Ctx, rd int, offset int)
+    rv_emit(ctx, rv_enc_j(RV_OP_JAL, rd, offset))
+
+// JALR rd, rs1, offset (JALR x0, x1, 0 = RET)
+fn rv_jalr(ctx Ctx, rd int, rs1 int, offset int)
+    rv_emit(ctx, rv_enc_i(RV_OP_JALR, rd, RV_F3_BEQ, rs1, offset))
+
+// LUI rd, imm (load upper 20 bits)
+fn rv_lui(ctx Ctx, rd int, imm int)
+    rv_emit(ctx, rv_enc_u(RV_OP_LUI, rd, imm))
+
+// AUIPC rd, imm (add upper immediate to PC)
+fn rv_auipc(ctx Ctx, rd int, imm int)
+    rv_emit(ctx, rv_enc_u(RV_OP_AUIPC, rd, imm))
+
+// ECALL
+fn rv_ecall(ctx Ctx)
+    rv_emit(ctx, RV_OP_SYSTEM)
+
+// RET = JALR x0, x1, 0
+fn rv_ret(ctx Ctx)
+    rv_jalr(ctx, RV_ZERO, RV_RA, 0)
+
+// MV rd, rs1 = ADDI rd, rs1, 0
+fn rv_mv(ctx Ctx, rd int, rs1 int)
+    rv_addi(ctx, rd, rs1, 0)
+
+// LI rd, imm (load immediate — uses LUI+ADDI for large values, ADDI for small)
+fn rv_li(ctx Ctx, rd int, imm int)
+    // If imm fits in 12-bit signed (-2048..2047), use ADDI rd, x0, imm
+    if imm >= -2048 and imm <= 2047
+        rv_addi(ctx, rd, RV_ZERO, imm)
+        return
+    // Otherwise: LUI rd, upper20; ADDI rd, rd, lower12
+    // Need to handle sign-extension of lower 12 bits
+    let mut upper = (imm >> 12) & 1048575
+    let lower = imm & 4095
+    // If lower would be sign-extended as negative, adjust upper
+    if lower >= 2048
+        upper = (upper + 1) & 1048575
+    rv_lui(ctx, rd, upper)
+    rv_addi(ctx, rd, rd, lower)
+
+// ---------------------------------------------------------------------------
+// Helper: push/pop on stack (8 bytes each, 16-byte aligned)
+// ---------------------------------------------------------------------------
+
+// rv_push: SD rs, [sp, -16]; ADDI sp, sp, -16  (also keeps 16-byte alignment)
+// Actually for RV64 we want: ADDI sp, sp, -16; SD rs, [sp, 8] (or [sp, 0])
+// To keep things simple: ADDI sp, sp, -16; SD rs, [sp, 8]
+fn rv_push(ctx Ctx, rs int)
+    rv_addi(ctx, RV_SP, RV_SP, -16)
+    rv_sd(ctx, rs, RV_SP, 8)
+
+// rv_pop: LD rd, [sp, 8]; ADDI sp, sp, 16
+fn rv_pop(ctx Ctx, rd int)
+    rv_ld(ctx, rd, RV_SP, 8)
+    rv_addi(ctx, RV_SP, RV_SP, 16)
+
+// ---------------------------------------------------------------------------
+// RV64 codegen dispatchers
+// ---------------------------------------------------------------------------
+
+// rv_cg_expr: evaluate expression, result in a0 (x10)
+fn rv_cg_expr(ctx Ctx, e Node)
+    if e.kind == "int_lit"
+        let val = parse_int(e.sval)
+        rv_li(ctx, RV_A0, val)
+        return
+    if e.kind == "bool_true"
+        rv_li(ctx, RV_A0, 1)
+        return
+    if e.kind == "bool_false"
+        rv_li(ctx, RV_A0, 0)
+        return
+    if e.kind == "nil"
+        rv_li(ctx, RV_A0, 0)
+        return
+    if e.kind == "float_lit"
+        let val = parse_int(e.sval)
+        rv_li(ctx, RV_A0, val)
+        return
+    if e.kind == "ident"
+        let offset = cg_get_var_offset(ctx, e.sval)
+        rv_ld(ctx, RV_A0, RV_FP, offset)
+        return
+    if e.kind == "binary"
+        rv_cg_binary(ctx, e)
+        return
+    if e.kind == "unary"
+        rv_cg_unary(ctx, e)
+        return
+    if e.kind == "call"
+        rv_cg_call(ctx, e)
+        return
+    if e.kind == "string_lit"
+        let data_off = ctx.data_len
+        cg_add_string(ctx, e.sval)
+        // AUIPC + ADDI to compute address (PC-relative)
+        // AUIPC a0, 0; ADDI a0, a0, 0 — we patch both at fixup time
+        let auipc_pos = ctx.code_len
+        rv_auipc(ctx, RV_A0, 0)
+        rv_addi(ctx, RV_A0, RV_A0, 0)
+        rv_add_fixup(ctx, auipc_pos, data_off)
+        return
+    if e.kind == "if_expr"
+        rv_cg_if_expr(ctx, e)
+        return
+    rv_li(ctx, RV_A0, 0)
+
+// rv_add_fixup: record an AUIPC+ADDI fixup for RV64
+// At patch time, we need to compute the offset from auipc_pos to (code_len + data_off)
+// and split it into upper20 + lower12 (with sign-extension handling).
+fn rv_add_fixup(ctx Ctx, auipc_pos int, data_off int)
+    let idx = ctx.fixup_count
+    // Use 300000+ region of code_data for RV64 fixups
+    ctx.code_data[300000 + idx * 2] = auipc_pos
+    ctx.code_data[300000 + idx * 2 + 1] = data_off
+    ctx.fixup_count = idx + 1
+
+// rv_apply_fixups: patch all AUIPC+ADDI pairs
+fn rv_apply_fixups(ctx Ctx)
+    let mut i = 0
+    while i < ctx.fixup_count
+        let auipc_pos = ctx.code_data[300000 + i * 2]
+        let data_off = ctx.code_data[300000 + i * 2 + 1]
+        // Target = code_len + data_off (data starts after code)
+        // AUIPC reads PC = auipc_pos, so offset = target - auipc_pos
+        let off = (ctx.code_len + data_off) - auipc_pos
+        // Split into upper20 and lower12
+        let mut upper = (off >> 12) & 1048575
+        let lower = off & 4095
+        if lower >= 2048
+            upper = (upper + 1) & 1048575
+        // Patch AUIPC: [imm[31:12]:20 | rd:5 | opcode:7]
+        // AUIPC instruction at auipc_pos: 0x17 | (rd << 7) | (upper << 12)
+        let auipc_instr = (upper * 4096) + (RV_A0 * 128) + RV_OP_AUIPC
+        ctx.code_data[auipc_pos] = auipc_instr % 256
+        ctx.code_data[auipc_pos + 1] = (auipc_instr / 256) % 256
+        ctx.code_data[auipc_pos + 2] = (auipc_instr / 65536) % 256
+        ctx.code_data[auipc_pos + 3] = (auipc_instr / 16777216) % 256
+        // Patch ADDI: [imm:12 | rs1:5 | funct3:3 | rd:5 | opcode:7]
+        let addi_pos = auipc_pos + 4
+        let addi_instr = (lower * 1048576) + (RV_A0 * 32768) + (RV_F3_ADDI * 4096) + (RV_A0 * 128) + RV_OP_OP_IMM
+        ctx.code_data[addi_pos] = addi_instr % 256
+        ctx.code_data[addi_pos + 1] = (addi_instr / 256) % 256
+        ctx.code_data[addi_pos + 2] = (addi_instr / 65536) % 256
+        ctx.code_data[addi_pos + 3] = (addi_instr / 16777216) % 256
+        i = i + 1
+
+// rv_apply_call_fixups: patch all JAL instructions
+fn rv_apply_call_fixups(ctx Ctx)
+    let mut ci = 0
+    while ci < ctx.call_fixup_count
+        let call_pos = ctx.call_fixups[ci * 2]
+        let fn_name = ctx.call_fixups[ci * 2 + 1]
+        if ctx.fn_table.has(fn_name)
+            let fn_start = ctx.fn_table[fn_name]
+            let disp = fn_start - call_pos
+            // JAL encoding: [imm[20]:1 | imm[10:1]:10 | imm[11]:1 | imm[19:12]:8 | rd:5 | opcode:7]
+            let bit20 = (disp >> 20) & 1
+            let bits10to1 = (disp >> 1) & 1023
+            let bit11 = (disp >> 11) & 1
+            let bits19to12 = (disp >> 12) & 255
+            let instr = (bit20 * 2147483648) + (bits10to1 * 2097152) + (bit11 * 1048576) + (bits19to12 * 4096) + (RV_RA * 128) + RV_OP_JAL
+            ctx.code_data[call_pos] = instr % 256
+            ctx.code_data[call_pos + 1] = (instr / 256) % 256
+            ctx.code_data[call_pos + 2] = (instr / 65536) % 256
+            ctx.code_data[call_pos + 3] = (instr / 16777216) % 256
+        ci = ci + 1
+
+// rv_patch_branch: patch a B-format branch placeholder at pos to target
+fn rv_patch_branch(ctx Ctx, pos int, target int)
+    let off = target - pos
+    // Read existing instruction to determine branch type (funct3)
+    let instr = ctx.code_data[pos] + (ctx.code_data[pos + 1] * 256) + (ctx.code_data[pos + 2] * 65536) + (ctx.code_data[pos + 3] * 16777216)
+    let funct3 = (instr >> 12) & 7
+    let rs1 = (instr >> 15) & 31
+    let rs2 = (instr >> 20) & 31
+    let new_instr = rv_enc_b(RV_OP_BRANCH, funct3, rs1, rs2, off)
+    ctx.code_data[pos] = new_instr % 256
+    ctx.code_data[pos + 1] = (new_instr / 256) % 256
+    ctx.code_data[pos + 2] = (new_instr / 65536) % 256
+    ctx.code_data[pos + 3] = (new_instr / 16777216) % 256
+
+// rv_patch_jal: patch a JAL placeholder at pos to target
+fn rv_patch_jal(ctx Ctx, pos int, target int)
+    let off = target - pos
+    let bit20 = (off >> 20) & 1
+    let bits10to1 = (off >> 1) & 1023
+    let bit11 = (off >> 11) & 1
+    let bits19to12 = (off >> 12) & 255
+    // Read existing instruction to get rd
+    let instr = ctx.code_data[pos] + (ctx.code_data[pos + 1] * 256) + (ctx.code_data[pos + 2] * 65536) + (ctx.code_data[pos + 3] * 16777216)
+    let rd = (instr >> 7) & 31
+    let new_instr = (bit20 * 2147483648) + (bits10to1 * 2097152) + (bit11 * 1048576) + (bits19to12 * 4096) + (rd * 128) + RV_OP_JAL
+    ctx.code_data[pos] = new_instr % 256
+    ctx.code_data[pos + 1] = (new_instr / 256) % 256
+    ctx.code_data[pos + 2] = (new_instr / 65536) % 256
+    ctx.code_data[pos + 3] = (new_instr / 16777216) % 256
+
+// rv_cg_binary: evaluate binary op, result in a0
+fn rv_cg_binary(ctx Ctx, e Node)
+    let la = e.a
+    let rb = e.b
+    let op = e.sval
+
+    if op == "and"
+        rv_cg_expr(ctx, la[0])
+        rv_push(ctx, RV_A0)
+        rv_cg_expr(ctx, rb[0])
+        rv_pop(ctx, RV_T0)
+        // a0 = (t0 != 0) and (a0 != 0)
+        rv_sltu(ctx, RV_A0, RV_ZERO, RV_A0)  // a0 = (a0 != 0) ? 1 : 0
+        rv_sltu(ctx, RV_T0, RV_ZERO, RV_T0)  // t0 = (t0 != 0) ? 1 : 0
+        rv_and(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "or"
+        rv_cg_expr(ctx, la[0])
+        rv_push(ctx, RV_A0)
+        rv_cg_expr(ctx, rb[0])
+        rv_pop(ctx, RV_T0)
+        rv_sltu(ctx, RV_A0, RV_ZERO, RV_A0)
+        rv_sltu(ctx, RV_T0, RV_ZERO, RV_T0)
+        rv_or(ctx, RV_A0, RV_T0, RV_A0)
+        return
+
+    // Evaluate left → a0, push, evaluate right → a0, pop into t0
+    rv_cg_expr(ctx, la[0])
+    rv_push(ctx, RV_A0)
+    rv_cg_expr(ctx, rb[0])
+    rv_pop(ctx, RV_T0)
+    // Now: t0 = left, a0 = right
+    // Compute a0 = t0 op a0
+
+    if op == "+"
+        rv_add(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "-"
+        rv_sub(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "*"
+        rv_mul(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "/"
+        rv_div(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "%"
+        rv_rem(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "=="
+        // a0 = (t0 == a0) ? 1 : 0
+        // SUB t1, t0, a0; SEQZ a0, t1 = SLTIU a0, t1, 1
+        rv_sub(ctx, RV_T1, RV_T0, RV_A0)
+        rv_sltu(ctx, RV_A0, RV_T1, 1)
+        return
+    if op == "!="
+        rv_sub(ctx, RV_T1, RV_T0, RV_A0)
+        rv_sltu(ctx, RV_A0, RV_ZERO, RV_T1)  // a0 = (t1 != 0) ? 1 : 0
+        return
+    if op == "<"
+        rv_slt(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == ">"
+        rv_slt(ctx, RV_A0, RV_A0, RV_T0)
+        return
+    if op == "<="
+        // a0 = (t0 <= a0) ? 1 : 0 = !(t0 > a0) = !(a0 < t0)
+        rv_slt(ctx, RV_T1, RV_A0, RV_T0)
+        rv_xori(ctx, RV_A0, RV_T1, 1)
+        return
+    if op == ">="
+        rv_slt(ctx, RV_T1, RV_T0, RV_A0)
+        rv_xori(ctx, RV_A0, RV_T1, 1)
+        return
+    if op == "&"
+        rv_and(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "|"
+        rv_or(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "^"
+        rv_xor(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    rv_li(ctx, RV_A0, 0)
+
+// Helper: XORI rd, rs1, imm
+fn rv_xori(ctx Ctx, rd int, rs1 int, imm int)
+    rv_emit(ctx, rv_enc_i(RV_OP_OP_IMM, rd, RV_F3_XORI, rs1, imm))
+
+// Helper: ORI rd, rs1, imm
+fn rv_ori(ctx Ctx, rd int, rs1 int, imm int)
+    rv_emit(ctx, rv_enc_i(RV_OP_OP_IMM, rd, RV_F3_ORI, rs1, imm))
+
+// Helper: ANDI rd, rs1, imm
+fn rv_andi(ctx Ctx, rd int, rs1 int, imm int)
+    rv_emit(ctx, rv_enc_i(RV_OP_OP_IMM, rd, RV_F3_ANDI, rs1, imm))
+
+// rv_cg_unary: unary operations
+fn rv_cg_unary(ctx Ctx, e Node)
+    let operand = e.a[0]
+    let op = e.sval
+    if op == "-"
+        rv_cg_expr(ctx, operand)
+        rv_sub(ctx, RV_A0, RV_ZERO, RV_A0)
+        return
+    if op == "!"
+        rv_cg_expr(ctx, operand)
+        // a0 = (a0 == 0) ? 1 : 0 = SEQZ a0, a0 = SLTIU a0, a0, 1
+        rv_sltu(ctx, RV_A0, RV_A0, 1)
+        return
+    if op == "~"
+        rv_cg_expr(ctx, operand)
+        rv_xori(ctx, RV_A0, RV_A0, -1)
+        return
+    rv_cg_expr(ctx, operand)
+
+// rv_cg_call: function call
+fn rv_cg_call(ctx Ctx, e Node)
+    let fa = e.a
+    if fa[0].kind != "ident"
+        rv_li(ctx, RV_A0, 0)
+        return
+    let fn_name = fa[0].sval
+
+    if fn_name == "println"
+        let args = e.list
+        if args.len() > 0
+            let arg = args[0]
+            if arg.kind == "string_lit"
+                rv_cg_print_string_lit(ctx, arg.sval)
+            else
+                if arg.kind == "int_lit"
+                    rv_li(ctx, RV_A0, parse_int(arg.sval))
+                    rv_cg_print_int(ctx)
+                else
+                    if arg.kind == "bool_true"
+                        rv_cg_print_string_lit(ctx, "true")
+                    else
+                        if arg.kind == "bool_false"
+                            rv_cg_print_string_lit(ctx, "false")
+                        else
+                            if arg.kind == "ident"
+                                if ctx.var_types.has(arg.sval)
+                                    let vt = ctx.var_types[arg.sval]
+                                    if vt == "str"
+                                        let offset = cg_get_var_offset(ctx, arg.sval)
+                                        rv_ld(ctx, RV_A0, RV_FP, offset)
+                                        rv_cg_print_string_val(ctx)
+                                    else
+                                        rv_cg_expr(ctx, arg)
+                                        rv_cg_print_int(ctx)
+                                else
+                                    rv_cg_expr(ctx, arg)
+                                    rv_cg_print_int(ctx)
+                            else
+                                rv_cg_expr(ctx, arg)
+                                rv_cg_print_int(ctx)
+        rv_cg_print_string_lit(ctx, "\n")
+        return
+    if fn_name == "print"
+        let args = e.list
+        if args.len() > 0
+            let arg = args[0]
+            if arg.kind == "string_lit"
+                rv_cg_print_string_lit(ctx, arg.sval)
+                return
+            if arg.kind == "int_lit"
+                rv_li(ctx, RV_A0, parse_int(arg.sval))
+                rv_cg_print_int(ctx)
+                return
+            if arg.kind == "bool_true"
+                rv_cg_print_string_lit(ctx, "true")
+                return
+            if arg.kind == "bool_false"
+                rv_cg_print_string_lit(ctx, "false")
+                return
+            if arg.kind == "ident"
+                if ctx.var_types.has(arg.sval)
+                    let vt = ctx.var_types[arg.sval]
+                    if vt == "str"
+                        let offset = cg_get_var_offset(ctx, arg.sval)
+                        rv_ld(ctx, RV_A0, RV_FP, offset)
+                        rv_cg_print_string_val(ctx)
+                        return
+            rv_cg_expr(ctx, arg)
+            rv_cg_print_int(ctx)
+        return
+    if fn_name == "len"
+        let args = e.list
+        if args.len() > 0
+            rv_cg_expr(ctx, args[0])
+            rv_ld(ctx, RV_A0, RV_A0, 0)
+            return
+        rv_li(ctx, RV_A0, 0)
+        return
+
+    // User-defined function call: evaluate args in reverse, placing in a0-a7
+    let args = e.list
+    let nargs = args.len()
+    let mut ai = nargs - 1
+    while ai >= 0 and ai < 8
+        rv_cg_expr(ctx, args[ai])
+        if ai == 1
+            rv_mv(ctx, RV_A1, RV_A0)
+        if ai == 2
+            rv_mv(ctx, RV_A2, RV_A0)
+        if ai == 3
+            rv_mv(ctx, RV_A3, RV_A0)
+        if ai == 4
+            rv_mv(ctx, RV_A4, RV_A0)
+        if ai == 5
+            rv_mv(ctx, RV_A5, RV_A0)
+        if ai == 6
+            rv_mv(ctx, RV_A6, RV_A0)
+        if ai == 7
+            rv_mv(ctx, RV_A7, RV_A0)
+        ai = ai - 1
+
+    // JAL ra, #offset (placeholder — patched later)
+    let jal_pos = ctx.code_len
+    rv_jal(ctx, RV_RA, 0)
+    let cidx = ctx.call_fixup_count
+    ctx.call_fixups[cidx * 2] = jal_pos
+    ctx.call_fixups[cidx * 2 + 1] = fn_name
+    ctx.call_fixup_count = cidx + 1
+
+// rv_cg_print_string_lit: print a string literal
+fn rv_cg_print_string_lit(ctx Ctx, s str)
+    let data_off = ctx.data_len
+    cg_add_string(ctx, s)
+    // AUIPC a1, 0; ADDI a1, a1, 0 — patched later
+    let auipc_pos = ctx.code_len
+    rv_auipc(ctx, RV_A1, 0)
+    rv_addi(ctx, RV_A1, RV_A1, 0)
+    rv_add_fixup(ctx, auipc_pos, data_off)
+    // ADDI a1, a1, 8 (skip length header)
+    rv_addi(ctx, RV_A1, RV_A1, 8)
+    // LI a2, len
+    rv_li(ctx, RV_A2, s.len())
+    // LI a0, 1 (stdout)
+    rv_li(ctx, RV_A0, 1)
+    // LI a7, 64 (write)
+    rv_li(ctx, RV_A7, 64)
+    // ECALL
+    rv_ecall(ctx)
+
+// rv_cg_print_string_val: print a string value (a0 = pointer to header)
+fn rv_cg_print_string_val(ctx Ctx)
+    // Save a0 in s1 (callee-saved)
+    rv_mv(ctx, RV_S1, RV_A0)
+    // a2 = [a0] (length)
+    rv_ld(ctx, RV_A2, RV_S1, 0)
+    // a1 = a0 + 8 (data)
+    rv_addi(ctx, RV_A1, RV_S1, 8)
+    // a0 = 1, a7 = 64
+    rv_li(ctx, RV_A0, 1)
+    rv_li(ctx, RV_A7, 64)
+    rv_ecall(ctx)
+
+// rv_cg_print_int: print integer in a0 to stdout
+fn rv_cg_print_int(ctx Ctx)
+    // Save callee-saved registers we use
+    rv_push(ctx, RV_S1)
+    rv_push(ctx, RV_S2)
+    rv_push(ctx, RV_S3)
+    rv_push(ctx, RV_S4)
+    rv_push(ctx, RV_S5)
+
+    // Allocate 32-byte buffer on stack
+    rv_addi(ctx, RV_SP, RV_SP, -32)
+    rv_mv(ctx, RV_S2, RV_SP)  // s2 = buffer
+
+    // Save X0 in s1
+    rv_mv(ctx, RV_S1, RV_A0)
+
+    // Special case: a0 == 0 → write "0"
+    rv_beq(ctx, RV_S1, RV_ZERO, 0)  // placeholder
+    let beq_zero_pos = ctx.code_len - 4
+
+    // Handle negative: if s1 < 0, write '-' and negate
+    rv_slt(ctx, RV_T0, RV_S1, RV_ZERO)  // t0 = (s1 < 0) ? 1 : 0
+    rv_beq(ctx, RV_T0, RV_ZERO, 0)  // placeholder (if not negative, skip)
+    let beq_notneg_pos = ctx.code_len - 4
+
+    // Write '-' character
+    rv_li(ctx, RV_T1, 45)  // '-'
+    rv_sb(ctx, RV_T1, RV_S2, 0)
+    rv_li(ctx, RV_A0, 1)  // stdout
+    rv_mv(ctx, RV_A1, RV_S2)
+    rv_li(ctx, RV_A2, 1)
+    rv_li(ctx, RV_A7, 64)
+    rv_ecall(ctx)
+    // Negate s1: SUB s1, zero, s1
+    rv_sub(ctx, RV_S1, RV_ZERO, RV_S1)
+
+    // not_negative_label:
+    let notneg_target = ctx.code_len
+    rv_patch_branch(ctx, beq_notneg_pos, notneg_target)
+
+    // s3 = 0 (digit count)
+    rv_li(ctx, RV_S3, 0)
+
+    // digit_loop:
+    let digit_loop = ctx.code_len
+    rv_beq(ctx, RV_S1, RV_ZERO, 0)  // placeholder
+    let beq_done_pos = ctx.code_len - 4
+
+    // t1 = s1 % 10; s1 = s1 / 10
+    rv_li(ctx, RV_T2, 10)
+    rv_rem(ctx, RV_T1, RV_S1, RV_T2)
+    rv_div(ctx, RV_S1, RV_S1, RV_T2)
+
+    // digit_char = t1 + '0'
+    rv_addi(ctx, RV_T1, RV_T1, 48)
+    // SB t1, [s2, s3]
+    rv_add(ctx, RV_T3, RV_S2, RV_S3)
+    rv_sb(ctx, RV_T1, RV_T3, 0)
+    // s3++
+    rv_addi(ctx, RV_S3, RV_S3, 1)
+    // B digit_loop
+    let b_loop_pos = ctx.code_len
+    rv_jal(ctx, RV_ZERO, 0)
+    rv_patch_jal(ctx, b_loop_pos, digit_loop)
+
+    // done_label:
+    let done_target = ctx.code_len
+    rv_patch_branch(ctx, beq_done_pos, done_target)
+
+    // Reverse digits into second buffer
+    rv_addi(ctx, RV_SP, RV_SP, -32)
+    rv_mv(ctx, RV_S4, RV_SP)  // s4 = reversed buffer
+
+    rv_li(ctx, RV_S5, 0)  // s5 = output index
+    rv_addi(ctx, RV_T3, RV_S3, -1)  // t3 = input index (going down)
+
+    // reverse_loop:
+    let rev_loop = ctx.code_len
+    rv_beq(ctx, RV_S5, RV_S3, 0)  // placeholder
+    let beq_rev_done_pos = ctx.code_len - 4
+
+    // LBU t1, [s2, t3]
+    rv_add(ctx, RV_T0, RV_S2, RV_T3)
+    rv_lbu(ctx, RV_T1, RV_T0, 0)
+    // SB t1, [s4, s5]
+    rv_add(ctx, RV_T0, RV_S4, RV_S5)
+    rv_sb(ctx, RV_T1, RV_T0, 0)
+
+    // s5++
+    rv_addi(ctx, RV_S5, RV_S5, 1)
+    // t3--
+    rv_addi(ctx, RV_T3, RV_T3, -1)
+    // B reverse_loop
+    let b_rev_pos = ctx.code_len
+    rv_jal(ctx, RV_ZERO, 0)
+    rv_patch_jal(ctx, b_rev_pos, rev_loop)
+
+    // rev_done_label:
+    let rev_done_target = ctx.code_len
+    rv_patch_branch(ctx, beq_rev_done_pos, rev_done_target)
+
+    // Write s5 bytes from s4
+    rv_li(ctx, RV_A0, 1)
+    rv_mv(ctx, RV_A1, RV_S4)
+    rv_mv(ctx, RV_A2, RV_S5)
+    rv_li(ctx, RV_A7, 64)
+    rv_ecall(ctx)
+
+    // Deallocate buffers
+    rv_addi(ctx, RV_SP, RV_SP, 64)
+    // B past_zero
+    let b_past_pos = ctx.code_len
+    rv_jal(ctx, RV_ZERO, 0)
+
+    // zero_case: write "0"
+    let zero_target = ctx.code_len
+    rv_patch_branch(ctx, beq_zero_pos, zero_target)
+    let zdata_off = ctx.data_len
+    cg_add_string(ctx, "0")
+    let zauipc_pos = ctx.code_len
+    rv_auipc(ctx, RV_A1, 0)
+    rv_addi(ctx, RV_A1, RV_A1, 0)
+    rv_add_fixup(ctx, zauipc_pos, zdata_off)
+    rv_addi(ctx, RV_A1, RV_A1, 8)
+    rv_li(ctx, RV_A2, 1)
+    rv_li(ctx, RV_A0, 1)
+    rv_li(ctx, RV_A7, 64)
+    rv_ecall(ctx)
+    rv_addi(ctx, RV_SP, RV_SP, 32)
+
+    let past_zero_target = ctx.code_len
+    rv_patch_jal(ctx, b_past_pos, past_zero_target)
+
+    // Pop callee-saved registers
+    rv_pop(ctx, RV_S5)
+    rv_pop(ctx, RV_S4)
+    rv_pop(ctx, RV_S3)
+    rv_pop(ctx, RV_S2)
+    rv_pop(ctx, RV_S1)
+
+// rv_cg_if_expr: if as an expression (stub)
+fn rv_cg_if_expr(ctx Ctx, e Node)
+    rv_li(ctx, RV_A0, 0)
+
+// ---------------------------------------------------------------------------
+// RV64 statement codegen
+// ---------------------------------------------------------------------------
+
+fn rv_cg_stmt(ctx Ctx, s Node)
+    if s.kind == "let_stmt"
+        let va = s.a
+        let init = va[0]
+        if init.kind == "string_lit"
+            ctx.var_types[s.sval] = "str"
+        if init.kind == "int_lit"
+            ctx.var_types[s.sval] = "int"
+        if init.kind == "bool_true"
+            ctx.var_types[s.sval] = "bool"
+        if init.kind == "bool_false"
+            ctx.var_types[s.sval] = "bool"
+        if init.kind == "ident"
+            if ctx.var_types.has(init.sval)
+                ctx.var_types[s.sval] = ctx.var_types[init.sval]
+        if init.kind == "call"
+            let fa = init.a
+            if fa[0].kind == "ident"
+                let fname = fa[0].sval
+                if ctx.fn_ret_types.has(fname)
+                    let rt = ctx.fn_ret_types[fname]
+                    if rt == "str"
+                        ctx.var_types[s.sval] = "str"
+                    if rt == "int"
+                        ctx.var_types[s.sval] = "int"
+                    if rt == "bool"
+                        ctx.var_types[s.sval] = "bool"
+        rv_cg_expr(ctx, init)
+        let offset = cg_get_var_offset(ctx, s.sval)
+        rv_sd(ctx, RV_A0, RV_FP, offset)
+        return
+    if s.kind == "return"
+        if s.a.has(0)
+            let va = s.a
+            rv_cg_expr(ctx, va[0])
+        if ctx.is_main
+            if not s.a.has(0)
+                rv_li(ctx, RV_A0, 0)
+            rv_li(ctx, RV_A7, 93)
+            rv_ecall(ctx)
+        else
+            rv_emit_epilogue(ctx)
+        return
+    if s.kind == "expr_stmt"
+        let ea = s.a
+        rv_cg_expr(ctx, ea[0])
+        return
+    if s.kind == "assign"
+        let ea = s.a
+        let vb = s.b
+        let target = ea[0]
+        if target.kind == "ident"
+            rv_cg_expr(ctx, vb[0])
+            let offset = cg_get_var_offset(ctx, target.sval)
+            rv_sd(ctx, RV_A0, RV_FP, offset)
+            return
+        rv_cg_expr(ctx, vb[0])
+        return
+    if s.kind == "if_stmt"
+        rv_cg_if(ctx, s)
+        return
+    if s.kind == "while_stmt"
+        rv_cg_while(ctx, s)
+        return
+    if s.kind == "for_stmt"
+        if s.bval
+            rv_cg_for_range(ctx, s)
+        return
+    if s.kind == "assert_stmt"
+        let ea = s.a
+        rv_cg_expr(ctx, ea[0])
+        return
+
+fn rv_cg_if(ctx Ctx, s Node)
+    // if_stmt structure (matches x86_64 cg_if):
+    //   s.list = list of branch nodes
+    //   s.a = else block (may be empty)
+    // Each branch: b.a[0] = condition, b.b = block
+    let branches = s.list
+    let mut end_jumps = {}
+    let mut njumps = 0
+    let mut bi = 0
+    while bi < branches.len()
+        let b = branches[bi]
+        let ca = b.a
+        rv_cg_expr(ctx, ca[0])
+        // if a0 == 0, skip to next branch
+        rv_beq(ctx, RV_A0, RV_ZERO, 0)  // placeholder
+        let beq_next_pos = ctx.code_len - 4
+        // Then-block
+        let block = b.b
+        let mut si = 0
+        while si < block.len()
+            rv_cg_stmt(ctx, block[si])
+            si = si + 1
+        // JAL x0, end (unconditional jump)
+        let b_end_pos = ctx.code_len
+        rv_jal(ctx, RV_ZERO, 0)
+        end_jumps[njumps] = b_end_pos
+        njumps = njumps + 1
+        // Next branch / else starts here
+        let next_target = ctx.code_len
+        rv_patch_branch(ctx, beq_next_pos, next_target)
+        bi = bi + 1
+    // Else block (if any)
+    if s.a.has(0)
+        let eb = s.a
+        let else_block = eb[0].list
+        let mut j = 0
+        while j < else_block.len()
+            rv_cg_stmt(ctx, else_block[j])
+            j = j + 1
+    // Patch all end jumps to here
+    let end_target = ctx.code_len
+    let mut ji = 0
+    while ji < njumps
+        let jmp_pos = end_jumps[ji]
+        rv_patch_jal(ctx, jmp_pos, end_target)
+        ji = ji + 1
+
+fn rv_cg_while(ctx Ctx, s Node)
+    let ea = s.a
+    let cond = ea[0]
+    let loop_start = ctx.code_len
+    rv_cg_expr(ctx, cond)
+    rv_beq(ctx, RV_A0, RV_ZERO, 0)  // placeholder
+    let beq_end_pos = ctx.code_len - 4
+    let ld = ctx.loop_depth
+    ctx.continue_targets[ld] = loop_start
+    ctx.break_targets[ld] = beq_end_pos
+    ctx.loop_depth = ld + 1
+    let body = s.list
+    let mut i = 0
+    while i < body.len()
+        rv_cg_stmt(ctx, body[i])
+        i = i + 1
+    ctx.loop_depth = ld
+    // JAL x0, loop_start
+    let b_loop_pos = ctx.code_len
+    rv_jal(ctx, RV_ZERO, 0)
+    rv_patch_jal(ctx, b_loop_pos, loop_start)
+    // end_label:
+    let end_target = ctx.code_len
+    rv_patch_branch(ctx, beq_end_pos, end_target)
+
+fn rv_cg_for_range(ctx Ctx, s Node)
+    let ea = s.a
+    let range_node = ea[0]
+    let i_offset = cg_get_var_offset(ctx, s.sval)
+    if range_node.a.has(0)
+        let ra = range_node.a
+        rv_cg_expr(ctx, ra[0])
+    else
+        rv_li(ctx, RV_A0, 0)
+    rv_sd(ctx, RV_A0, RV_FP, i_offset)
+
+    let loop_start = ctx.code_len
+    rv_ld(ctx, RV_A0, RV_FP, i_offset)
+    if range_node.b.has(0)
+        let rb = range_node.b
+        rv_cg_expr(ctx, rb[0])
+    else
+        rv_li(ctx, RV_A0, 0)
+    // t0 = i, a0 = end
+    rv_mv(ctx, RV_T0, RV_A0)
+    rv_ld(ctx, RV_A0, RV_FP, i_offset)
+    // if a0 >= t0, exit
+    rv_bge(ctx, RV_A0, RV_T0, 0)  // placeholder
+    let bge_end_pos = ctx.code_len - 4
+
+    let ld = ctx.loop_depth
+    ctx.continue_targets[ld] = loop_start
+    ctx.break_targets[ld] = bge_end_pos
+    ctx.loop_depth = ld + 1
+    let body = s.list
+    let mut i = 0
+    while i < body.len()
+        rv_cg_stmt(ctx, body[i])
+        i = i + 1
+    ctx.loop_depth = ld
+
+    // i++
+    rv_ld(ctx, RV_A0, RV_FP, i_offset)
+    rv_addi(ctx, RV_A0, RV_A0, 1)
+    rv_sd(ctx, RV_A0, RV_FP, i_offset)
+    let b_loop_pos = ctx.code_len
+    rv_jal(ctx, RV_ZERO, 0)
+    rv_patch_jal(ctx, b_loop_pos, loop_start)
+    let end_target = ctx.code_len
+    rv_patch_branch(ctx, bge_end_pos, end_target)
+
+// (rv_bge is defined earlier, near the other branch instructions.)
+
+// ---------------------------------------------------------------------------
+// RV64 function codegen
+// ---------------------------------------------------------------------------
+
+// rv_emit_prologue: ADDI sp, sp, -frame_size; SD ra, [sp, frame-8]; SD s0, [sp, frame-16]
+//                   ADDI s0, sp, frame_size
+// Returns the position of the frame_size immediate (for patching)
+fn rv_emit_prologue(ctx Ctx) int
+    // ADDI sp, sp, #0 (placeholder — frame_size patched later)
+    let addi_sp_pos = ctx.code_len
+    rv_addi(ctx, RV_SP, RV_SP, 0)
+    // SD ra, [sp, 0] — placeholder, will patch offset later
+    rv_sd(ctx, RV_RA, RV_SP, 0)
+    // SD s0, [sp, 8] — placeholder
+    rv_sd(ctx, RV_FP, RV_SP, 8)
+    // ADDI s0, sp, #0 (placeholder — frame_size patched later)
+    let addi_fp_pos = ctx.code_len
+    rv_addi(ctx, RV_FP, RV_SP, 0)
+    return addi_sp_pos
+
+// rv_emit_epilogue: LD ra, [sp, frame-8]; LD s0, [sp, frame-16]; ADDI sp, sp, frame; RET
+// We assume frame_size was stored at prologue time. For simplicity, we re-derive
+// it from ctx.next_slot at epilogue emit time.
+fn rv_emit_epilogue(ctx Ctx)
+    // Frame layout:
+    //   sp+0:            RA (saved in prologue)
+    //   sp+8:            old s0 (saved in prologue)
+    //   sp+16:           locals (frame_size bytes)
+    //   sp+total = s0:   top of frame
+    // Epilogue: LD ra, [sp, 0]; LD s0, [sp, 8]; ADDI sp, sp, total; RET
+    let frame_size = 0 - ctx.next_slot - 8
+    // Align frame_size to 16 bytes
+    let mut aligned = frame_size
+    if aligned % 16 != 0
+        aligned = aligned + (16 - (aligned % 16))
+    let total = aligned + 16
+    // LD ra, [sp, 0]
+    rv_ld(ctx, RV_RA, RV_SP, 0)
+    // LD s0, [sp, 8]
+    rv_ld(ctx, RV_FP, RV_SP, 8)
+    // ADDI sp, sp, total
+    rv_addi(ctx, RV_SP, RV_SP, total)
+    // RET
+    rv_ret(ctx)
+
+fn rv_cg_function(ctx Ctx, fn_decl Node, is_main bool)
+    let fn_start = ctx.code_len
+    let fn_name = fn_decl.sval
+    ctx.fn_table[fn_name] = fn_start
+    ctx.fn_count = ctx.fn_count + 1
+    ctx.var_slots = {}
+    ctx.next_slot = -8
+    ctx.var_types = {}
+
+    // Prologue
+    let addi_sp_pos = rv_emit_prologue(ctx)
+
+    // Save parameters: a0-a7 → local slots
+    let params = fn_decl.a
+    let mut pi = 0
+    while pi < params.len() and pi < 8
+        let param = params[pi]
+        let local_offset = cg_get_var_offset(ctx, param.sval)
+        // SD a(pi), [fp, local_offset]
+        rv_sd(ctx, 10 + pi, RV_FP, local_offset)
+        ctx.var_types[param.sval] = param.extra
+        pi = pi + 1
+
+    ctx.is_main = is_main
+    let body = fn_decl.list
+    let mut i = 0
+    while i < body.len()
+        rv_cg_stmt(ctx, body[i])
+        i = i + 1
+
+    // Default return: a0 = 0
+    if is_main
+        rv_li(ctx, RV_A0, 0)
+        rv_li(ctx, RV_A7, 93)
+        rv_ecall(ctx)
+    else
+        rv_li(ctx, RV_A0, 0)
+        rv_emit_epilogue(ctx)
+
+    // Patch frame size in prologue
+    // Frame layout:
+    //   sp+0:            RA
+    //   sp+8:            old s0
+    //   sp+16:           locals (frame_size bytes)
+    //   sp+total = s0:   top of frame
+    let frame_size = 0 - ctx.next_slot - 8
+    let mut aligned = frame_size
+    if aligned % 16 != 0
+        aligned = aligned + (16 - (aligned % 16))
+    let total = aligned + 16
+    let neg_total = 0 - total
+    if total >= -2048 and total <= 2047
+        // Patch ADDI sp, sp, -total (allocate stack)
+        let instr_sp = rv_enc_i(RV_OP_OP_IMM, RV_SP, RV_F3_ADDI, RV_SP, neg_total)
+        ctx.code_data[addi_sp_pos] = instr_sp % 256
+        ctx.code_data[addi_sp_pos + 1] = (instr_sp / 256) % 256
+        ctx.code_data[addi_sp_pos + 2] = (instr_sp / 65536) % 256
+        ctx.code_data[addi_sp_pos + 3] = (instr_sp / 16777216) % 256
+        // Patch SD ra, [sp, 0]
+        let sd_ra_pos = addi_sp_pos + 4
+        let sd_ra_instr = rv_enc_s(RV_OP_STORE, RV_F3_SD, RV_SP, RV_RA, 0)
+        ctx.code_data[sd_ra_pos] = sd_ra_instr % 256
+        ctx.code_data[sd_ra_pos + 1] = (sd_ra_instr / 256) % 256
+        ctx.code_data[sd_ra_pos + 2] = (sd_ra_instr / 65536) % 256
+        ctx.code_data[sd_ra_pos + 3] = (sd_ra_instr / 16777216) % 256
+        // Patch SD s0, [sp, 8]
+        let sd_s0_pos = sd_ra_pos + 4
+        let sd_s0_instr = rv_enc_s(RV_OP_STORE, RV_F3_SD, RV_SP, RV_FP, 8)
+        ctx.code_data[sd_s0_pos] = sd_s0_instr % 256
+        ctx.code_data[sd_s0_pos + 1] = (sd_s0_instr / 256) % 256
+        ctx.code_data[sd_s0_pos + 2] = (sd_s0_instr / 65536) % 256
+        ctx.code_data[sd_s0_pos + 3] = (sd_s0_instr / 16777216) % 256
+        // Patch ADDI s0, sp, total (set frame pointer to top of frame)
+        let addi_fp_pos = sd_s0_pos + 4
+        let addi_fp_instr = rv_enc_i(RV_OP_OP_IMM, RV_FP, RV_F3_ADDI, RV_SP, total)
+        ctx.code_data[addi_fp_pos] = addi_fp_instr % 256
+        ctx.code_data[addi_fp_pos + 1] = (addi_fp_instr / 256) % 256
+        ctx.code_data[addi_fp_pos + 2] = (addi_fp_instr / 65536) % 256
+        ctx.code_data[addi_fp_pos + 3] = (addi_fp_instr / 16777216) % 256
