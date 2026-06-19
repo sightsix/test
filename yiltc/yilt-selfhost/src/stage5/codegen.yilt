@@ -33,22 +33,18 @@ struct Ctx
     mut call_fixups table
     mut call_fixup_count int
     mut is_main bool
-    // Loop context for break/continue.
     mut loop_depth int
     mut break_targets table
     mut continue_targets table
     mut break_fixups table
     mut break_fixup_count int
-    // var_types tracks variable types for print dispatch.
-    // "str" = string (RAX = pointer to length-prefixed data)
-    // "int" = integer (RAX = raw value)
-    // "bool" = boolean (RAX = 0 or 1)
     mut var_types table
-    // fn_ret_types maps function name → return type ("str", "int", "bool", "")
     mut fn_ret_types table
+    // Target architecture: 0=x86_64, 1=aarch64
+    mut target int
 
 fn ctx_new() Ctx
-    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0, fixup_count: 0, fn_table: {}, fn_count: 0, call_fixups: {}, call_fixup_count: 0, is_main: false, loop_depth: 0, break_targets: {}, continue_targets: {}, break_fixups: {}, break_fixup_count: 0, var_types: {}, fn_ret_types: {}}
+    let mut ctx = Ctx{code_data: {}, code_len: 0, data_data: {}, data_len: 0, var_slots: {}, next_slot: -8, string_count: 0, fixup_count: 0, fn_table: {}, fn_count: 0, call_fixups: {}, call_fixup_count: 0, is_main: false, loop_depth: 0, break_targets: {}, continue_targets: {}, break_fixups: {}, break_fixup_count: 0, var_types: {}, fn_ret_types: {}, target: 0}
     return ctx
 
 // ---------------------------------------------------------------------------
@@ -102,6 +98,187 @@ fn data_str(ctx Ctx, s str)
 // ---------------------------------------------------------------------------
 // Section 4: x86_64 instruction encoders
 // ---------------------------------------------------------------------------
+
+// AArch64 register definitions (for target=1)
+let X0 = 0
+let X1 = 1
+let X2 = 2
+let X3 = 3
+let X4 = 4
+let X8 = 8
+let X9 = 9
+let X10 = 10
+let X11 = 11
+let X16 = 16
+let X17 = 17
+let X19 = 19
+let X20 = 20
+let X21 = 21
+let X22 = 22
+let X23 = 23
+let X24 = 24
+let X25 = 25
+let X26 = 26
+let X27 = 27
+let X28 = 28
+let X29 = 29
+let X30 = 30
+let X31 = 31
+let XZR = 31
+
+// AArch64 instruction encoders
+// All AArch64 instructions are 4 bytes, little-endian.
+
+// Emit a 32-bit AArch64 instruction (little-endian)
+fn arm_emit(ctx Ctx, instr int)
+    code_byte(ctx, instr % 256)
+    code_byte(ctx, (instr / 256) % 256)
+    code_byte(ctx, (instr / 65536) % 256)
+    code_byte(ctx, (instr / 16777216) % 256)
+
+// MOV (register): MOV Xd, Xm = ORR Xd, XZR, Xm
+// Encoding: 1AA01010 00Mmmmmm ddddd 11111 mmmmm
+// = 0xAA0003E0 | (Rm << 16) | (Rd)
+fn arm_mov_reg(ctx Ctx, dst int, src int)
+    let instr = 0xAA0003E0 + (src * 65536) + dst
+    arm_emit(ctx, instr)
+
+// MOVZ Xd, #imm16, lsl #shift (for loading 16-bit immediates)
+// Encoding: 110100101 00 imm16 Rd
+// = 0xD2800000 | (imm16 << 5) | Rd | (hw << 21)
+fn arm_movz(ctx Ctx, dst int, imm16 int, hw int)
+    let instr = 0xD2800000 + (imm16 * 32) + dst + (hw * 1048576)
+    arm_emit(ctx, instr)
+
+// MOVK Xd, #imm16, lsl #shift (keep and insert 16 bits)
+// Encoding: 111100101 00 imm16 Rd
+// = 0xF2800000 | (imm16 << 5) | Rd | (hw << 21)
+fn arm_movk(ctx Ctx, dst int, imm16 int, hw int)
+    let instr = 0xF2800000 + (imm16 * 32) + dst + (hw * 1048576)
+    arm_emit(ctx, instr)
+
+// Load a 64-bit immediate into Xd using MOVZ + MOVK
+fn arm_mov_imm64(ctx Ctx, dst int, val int)
+    let lo16 = val & 65535
+    let hi16_1 = (val >> 16) & 65535
+    let hi16_2 = (val >> 32) & 65535
+    let hi16_3 = (val >> 48) & 65535
+    arm_movz(ctx, dst, lo16, 0)
+    if hi16_1 != 0
+        arm_movk(ctx, dst, hi16_1, 1)
+    if hi16_2 != 0
+        arm_movk(ctx, dst, hi16_2, 2)
+    if hi16_3 != 0
+        arm_movk(ctx, dst, hi16_3, 3)
+
+// ADD Xd, Xn, Xm
+// Encoding: 10001011 00 0 Xm 0 Xn 0 Xd
+// = 0x8B000000 | (Rm << 16) | (Rn << 5) | Rd
+fn arm_add(ctx Ctx, dst int, src1 int, src2 int)
+    let instr = 0x8B000000 + (src2 * 65536) + (src1 * 32) + dst
+    arm_emit(ctx, instr)
+
+// SUB Xd, Xn, Xm
+// = 0xCB000000 | (Rm << 16) | (Rn << 5) | Rd
+fn arm_sub(ctx Ctx, dst int, src1 int, src2 int)
+    let instr = 0xCB000000 + (src2 * 65536) + (src1 * 32) + dst
+    arm_emit(ctx, instr)
+
+// MUL Xd, Xn, Xm = UMULH Xd, Xn, Xm (simplified: use MADD with XZR)
+// MADD Xd, Xn, Xm, XZR = 0x9B000000 | (Xm << 16) | (Xn << 5) | Xd | (XZR << 10)
+fn arm_mul(ctx Ctx, dst int, src1 int, src2 int)
+    let instr = 0x9B000000 + (src2 * 65536) + (src1 * 32) + dst + (31 * 1024)
+    arm_emit(ctx, instr)
+
+// SDIV Xd, Xn, Xm
+// = 0x9AC00C00 | (Rm << 16) | (Rn << 5) | Rd
+fn arm_sdiv(ctx Ctx, dst int, src1 int, src2 int)
+    let instr = 0x9AC00C00 + (src2 * 65536) + (src1 * 32) + dst
+    arm_emit(ctx, instr)
+
+// MSUB Xd, Xn, Xm, Xa (multiply-subtract: Xd = Xa - Xn * Xm)
+// Used for modulo: Xd = Xn - (Xn/Xm)*Xm
+// = 0x9B008000 | (Rm << 16) | (Ra << 10) | (Rn << 5) | Rd
+fn arm_msub(ctx Ctx, dst int, src1 int, src2 int, src3 int)
+    let instr = 0x9B008000 + (src2 * 65536) + (src3 * 1024) + (src1 * 32) + dst
+    arm_emit(ctx, instr)
+
+// CMP Xn, Xm = SUBS XZR, Xn, Xm
+// = 0xEB00001F | (Rm << 16) | (Rn << 5)
+fn arm_cmp(ctx Ctx, src1 int, src2 int)
+    let instr = 0xEB00001F + (src2 * 65536) + (src1 * 32)
+    arm_emit(ctx, instr)
+
+// STR Xd, [Xn, #offset] (store, 12-bit unsigned offset, scaled by 8)
+// = 0xF9000000 | (offset/8 << 10) | (Rn << 5) | Rd
+fn arm_str(ctx Ctx, src int, base int, offset int)
+    let scaled = offset / 8
+    let instr = 0xF9000000 + (scaled * 1024) + (base * 32) + src
+    arm_emit(ctx, instr)
+
+// LDR Xd, [Xn, #offset] (load, 12-bit unsigned offset, scaled by 8)
+// = 0xF9400000 | (offset/8 << 10) | (Rn << 5) | Rd
+fn arm_ldr(ctx Ctx, dst int, base int, offset int)
+    let scaled = offset / 8
+    let instr = 0xF9400000 + (scaled * 1024) + (base * 32) + dst
+    arm_emit(ctx, instr)
+
+// STP Xd, Xm, [Xn, #offset] (store pair, for prologue)
+// Pre-index: STP Xd, Xm, [Xn, #offset]!
+// = 0xA9000000 | ((offset/8 & 0x7F) << 15) | (Rm << 10) | (Rn << 5) | Rd
+fn arm_stp_pre(ctx Ctx, src1 int, src2 int, base int, offset int)
+    let scaled = offset / 8
+    let instr = 0xA9800000 + (scaled * 32768) + (src2 * 1024) + (base * 32) + src1
+    arm_emit(ctx, instr)
+
+// LDP Xd, Xm, [Xn], #offset (load pair, post-index, for epilogue)
+// = 0xA8C00000 | ((offset/8 & 0x7F) << 15) | (Rm << 10) | (Rn << 5) | Rd
+fn arm_ldp_post(ctx Ctx, dst1 int, dst2 int, base int, offset int)
+    let scaled = offset / 8
+    let instr = 0xA8C00000 + (scaled * 32768) + (dst2 * 1024) + (base * 32) + dst1
+    arm_emit(ctx, instr)
+
+// BL #offset (branch with link, for function calls)
+// Encoding: 100101 imm26
+// = 0x94000000 | (offset/4 & 0x3FFFFFF)
+fn arm_bl(ctx Ctx, offset int)
+    let imm = offset / 4
+    let instr = 0x94000000 + (imm & 67108863)
+    arm_emit(ctx, instr)
+
+// B #offset (unconditional branch)
+// = 0x14000000 | (offset/4 & 0x3FFFFFF)
+fn arm_b(ctx Ctx, offset int)
+    let imm = offset / 4
+    let instr = 0x14000000 + (imm & 67108863)
+    arm_emit(ctx, instr)
+
+// RET (return)
+// = 0xD65F03C0
+fn arm_ret(ctx Ctx)
+    arm_emit(ctx, 0xD65F03C0)
+
+// SVC #0 (supervisor call, for syscalls)
+// = 0xD4000001
+fn arm_svc(ctx Ctx)
+    arm_emit(ctx, 0xD4000001)
+
+// Conditional branches (B.EQ, B.NE, B.LT, B.GT, B.LE, B.GE, etc.)
+// = 0x54000000 | (cond << 0) | (offset/4 << 5)
+fn arm_bcond(ctx Ctx, cond int, offset int)
+    let imm = offset / 4
+    let instr = 0x54000000 + (imm * 32) + cond
+    arm_emit(ctx, instr)
+
+// CSET Xd, cond (set register to 1 if condition, 0 otherwise)
+// CSET Xd, cond = CSINC Xd, XZR, XZR, invert(cond)
+// = 0x9A1F0400 | (inv_cond << 12) | Rd
+fn arm_cset(ctx Ctx, dst int, cond int)
+    let inv_cond = cond ^ 1
+    let instr = 0x9A1F0400 + (inv_cond * 4096) + dst
+    arm_emit(ctx, instr)
+
+// x86_64 register definitions
 
 let RAX = 0
 let RCX = 1
@@ -306,9 +483,13 @@ fn build_elf(ctx Ctx, output_fd int) int
     // e_type (2 bytes) = ET_EXEC = 2
     write_byte(output_fd, 2)
     write_byte(output_fd, 0)
-    // e_machine (2 bytes) = EM_X86_64 = 62
-    write_byte(output_fd, 62)
-    write_byte(output_fd, 0)
+    // e_machine (2 bytes): EM_X86_64=62, EM_AARCH64=183
+    if ctx.target == 1
+        write_byte(output_fd, 183)
+        write_byte(output_fd, 0)
+    if ctx.target == 0
+        write_byte(output_fd, 62)
+        write_byte(output_fd, 0)
     // e_version (4 bytes) = 1
     write_u32_le(output_fd, 1)
     // e_entry (8 bytes)

@@ -856,3 +856,48 @@ Stage Summary:
 - String equality now works correctly (content comparison, not pointer)
 - Multi-target plan established (AArch64 first, then RISC-V, then WASM)
 - All 79 tests pass, true fixpoint verified
+
+---
+Task ID: 41-aarch64-infrastructure
+Agent: main (Super Z)
+Task: Add AArch64 instruction encoders and multi-target infrastructure.
+
+Work Log:
+- Added target field to Ctx struct (0=x86_64, 1=aarch64)
+- Added AArch64 register definitions (X0-X31, XZR)
+- Added 18 AArch64 instruction encoders:
+  - arm_emit: emit 4-byte little-endian instruction
+  - arm_mov_reg: MOV (register) = ORR Xd, XZR, Xm
+  - arm_movz: MOVZ Xd, #imm16, lsl #shift (16-bit immediate load)
+  - arm_movk: MOVK Xd, #imm16, lsl #shift (keep and insert 16 bits)
+  - arm_mov_imm64: load 64-bit immediate using MOVZ + MOVK chain
+  - arm_add: ADD Xd, Xn, Xm
+  - arm_sub: SUB Xd, Xn, Xm
+  - arm_mul: MUL Xd, Xn, Xm (via MADD with XZR)
+  - arm_sdiv: SDIV Xd, Xn, Xm
+  - arm_msub: MSUB Xd, Xn, Xm, Xa (for modulo computation)
+  - arm_cmp: CMP Xn, Xm (via SUBS XZR)
+  - arm_str: STR Xd, [Xn, #offset] (store with scaled offset)
+  - arm_ldr: LDR Xd, [Xn, #offset] (load with scaled offset)
+  - arm_stp_pre: STP Xd, Xm, [Xn, #offset]! (store pair, pre-index, for prologue)
+  - arm_ldp_post: LDP Xd, Xm, [Xn], #offset (load pair, post-index, for epilogue)
+  - arm_bl: BL #offset (branch with link, for calls)
+  - arm_b: B #offset (unconditional branch)
+  - arm_ret: RET (return via X30 link register)
+  - arm_svc: SVC #0 (supervisor call, for syscalls)
+  - arm_bcond: B.EQ/B.NE/B.LT/B.GT etc. (conditional branch)
+  - arm_cset: CSET Xd, cond (set register based on condition)
+
+- Updated build_elf to select ELF machine type based on target:
+  - target=0: EM_X86_64 (62)
+  - target=1: EM_AARCH64 (183)
+
+- Verified x86_64 still works: 79/79 tests pass, true fixpoint ✅
+- 179 functions in the self-host compiler (up from 158)
+
+Stage Summary:
+- AArch64 instruction encoders are in place (18 functions)
+- Multi-target infrastructure (target field, ELF machine type dispatch)
+- All x86_64 tests still pass, fixpoint verified
+- Next: add AArch64 codegen dispatch in cg_expr, cg_stmt, cg_function
+- Then: add AArch64 syscall conventions (X8=syscall number, X0-X5=args)
