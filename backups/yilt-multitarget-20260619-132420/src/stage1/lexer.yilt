@@ -1,0 +1,1192 @@
+// ===========================================================================
+// Yilt Self-Host Compiler — Stage 1: Full Yilt Lexer
+// ===========================================================================
+//
+// A complete lexer for the Yilt programming language, written in Yilt.
+// This is the second stage of the self-host bootstrap: it demonstrates
+// that Yilt can tokenise its own source code.
+//
+// Supported tokens:
+//   - 29 keywords: let, mut, fn, extern, pub, use, from, for, in, if, but,
+//     else, while, match, case, default, return, break, continue, spawn,
+//     await, const, assert, struct, enum, and, or, not, true, false, nil
+//   - Identifiers: [a-zA-Z_][a-zA-Z0-9_]*
+//   - Integer literals: decimal, 0x hex, 0b binary, 0o octal (with _ separators)
+//   - Float literals: digits.digits
+//   - String literals: "..." with escapes (\n, \t, \", \\, \r, \0)
+//   - F-strings: f"...{expr}..." (preserved as a single token)
+//   - Char literals: 'c' or '\n'
+//   - All operators: + - * / % & | ^ ~ << >> == != < <= > >=
+//     = += -= *= /= %= &= |= ^= <<= >>= ? -> . .. ... : , ;
+//     ( ) { } [ ] ++ --
+//   - Comments: // line and /* block (nested) */
+//   - Indentation tokens: INDENT and DEDENT (Python-style, 4-space units)
+//
+// The lexer produces two parallel arrays (tables):
+//   - tokens: integer-keyed table of Token structs
+//   - indents: integer-keyed table of Indent structs (level + line)
+//
+// The output is designed to be byte-for-byte compatible with the Go-based
+// yiltc lexer's token stream (modulo diagnostic differences).
+//
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Section 1: Token kinds
+// ---------------------------------------------------------------------------
+//
+// We use integer constants matching the Go lexer's T* enum values, so the
+// Yilt-written lexer and the Go-written lexer produce interchangeable token
+// streams.  This is critical for Stage 2 (the parser) which will consume
+// either.
+
+let T_EOF = 0
+let T_IDENT = 1
+let T_INT_LIT = 2
+let T_FLOAT_LIT = 3
+let T_STRING_LIT = 4
+let T_NIL = 5
+
+// Keywords
+let T_LET = 6
+let T_MUT = 7
+let T_FN = 8
+let T_EXTERN = 9
+let T_PUB = 10
+let T_USE = 11
+let T_FROM = 12
+let T_FOR = 13
+let T_IN = 14
+let T_IF = 15
+let T_BUT = 16
+let T_ELSE = 17
+let T_WHILE = 18
+let T_MATCH = 19
+let T_CASE = 20
+let T_DEFAULT = 21
+let T_RETURN = 22
+let T_BREAK = 23
+let T_CONTINUE = 24
+let T_SPAWN = 25
+let T_AWAIT = 26
+let T_CONST = 27
+let T_ASSERT = 28
+let T_STRUCT = 29
+let T_ENUM = 30
+
+// Operators
+let T_PLUS = 31
+let T_MINUS = 32
+let T_STAR = 33
+let T_SLASH = 34
+let T_PERCENT = 35
+let T_AMP = 36
+let T_PIPE = 37
+let T_CARET = 38
+let T_TILDE = 39
+let T_LSHIFT = 40
+let T_RSHIFT = 41
+let T_EQ = 42          // ==
+let T_NEQ = 43         // !=
+let T_LT = 44
+let T_LE = 45
+let T_GT = 46
+let T_GE = 47
+let T_ASSIGN = 48      // =
+let T_PLUS_EQ = 49
+let T_MINUS_EQ = 50
+let T_STAR_EQ = 51
+let T_SLASH_EQ = 52
+let T_PERCENT_EQ = 53
+let T_AMP_EQ = 54
+let T_PIPE_EQ = 55
+let T_CARET_EQ = 56
+let T_SHL_EQ = 57
+let T_SHR_EQ = 58
+let T_QUESTION = 59    // ?
+
+// Delimiters
+let T_LPAREN = 60      // (
+let T_RPAREN = 61      // )
+let T_LBRACE = 62      // {
+let T_RBRACE = 63      // }
+let T_LBRACK = 64      // [
+let T_RBRACK = 65      // ]
+let T_COMMA = 66       // ,
+let T_PERIOD = 67      // .
+let T_COLON = 68       // :
+let T_DOTDOT = 69      // ..
+let T_DOTDOTDOT = 70   // ...
+let T_ARROW = 71       // ->
+
+// Increment/decrement
+let T_PLUS_PLUS = 72   // ++
+let T_MINUS_MINUS = 73 // --
+
+// Literals
+let T_TRUE = 74
+let T_FALSE = 75
+let T_AND = 76         // and
+let T_OR = 77          // or
+let T_NOT = 78         // not
+
+// Interpolated string (f"...")
+let T_INTERP_STR = 79
+
+// Character literal 'c'
+let T_CHAR_LIT = 80
+
+// Pseudo-tokens for indentation (not emitted by the Go lexer's token stream
+// directly — the Go lexer uses a separate IndentToken array.  For Stage 1
+// we fold them into the main token stream to simplify downstream parsing).
+let T_INDENT = 81
+let T_DEDENT = 82
+let T_NEWLINE = 83
+let T_SEMICOLON = 84  // ';' — not used by Yilt but emitted for safety
+
+// ---------------------------------------------------------------------------
+// Section 2: Data structures
+// ---------------------------------------------------------------------------
+
+// A single token.  We use `value` as a string for all literal kinds —
+// integer and float literals store their source text (e.g. "0xFF", "3.14"),
+// string literals store the (unescaped) content, f-strings store the raw
+// content including {expr} segments.  This matches the Go lexer's
+// behaviour where `Value` is always a string.
+// 256-byte string containing all byte values 0-255.
+// Used by byte_to_str to convert byte values to single-character strings.
+
+fn byte_to_str(b int) str
+    return ALL_BYTES.substr(b, b + 1)
+
+
+struct Token
+    mut kind int
+    mut value str       // source text or literal value
+    mut line int        // 1-indexed source line
+    mut col int         // 1-indexed source column
+
+// Indentation event: emitted at the start of a line when the indentation
+// level changes.  `level` is in 4-space units (0 = no indent, 1 = 4 spaces,
+// 2 = 8 spaces, etc.).  A positive jump from the previous line's level
+// emits one INDENT token; a drop emits one or more DEDENT tokens.
+struct Indent
+    mut level int
+    mut line int
+
+// Lexer state.  We carry both the source string (for substr extraction)
+// and a byte table (for character classification), plus position tracking.
+//
+// The indentation stack is a table of integers (integer-keyed) representing
+// the active indentation levels.  The bottom of the stack is always 0.
+// Example: inside a function body that has a nested if-block, the stack is
+// {0: 0, 1: 1, 2: 2} (levels 0, 1, 2).  DEDENT pops levels off until we
+// reach the target level.
+struct Lexer
+    mut src str
+    mut bytes table
+    mut pos int
+    mut line int
+    mut col int
+    mut indent_stack table  // integer-keyed table of indentation levels
+    mut indent_depth int    // number of entries in indent_stack
+    mut at_line_start bool  // true if we're at the beginning of a logical line
+    mut pending_dedents int // number of DEDENT tokens to emit before next token
+
+// ---------------------------------------------------------------------------
+// Section 3: Lexer construction and basic accessors
+// ---------------------------------------------------------------------------
+
+fn lex_new(source str) Lexer
+    let mut l = Lexer{src: source, bytes: source.bytes(), pos: 0, line: 1, col: 1, indent_stack: {}, indent_depth: 1, at_line_start: true, pending_dedents: 0}
+    l.indent_stack[0] = 0
+    return l
+
+// Returns the byte at the current position, or -1 at EOF.
+fn lex_peek(l Lexer) int
+    let b = l.bytes
+    let pos = l.pos
+    if pos >= b.len()
+        return -1
+    return b[pos]
+
+// Returns the byte at position + n, or -1 if out of range.
+fn lex_peek_n(l Lexer, n int) int
+    let b = l.bytes
+    let pos = l.pos
+    let target = pos + n
+    if target >= b.len()
+        return -1
+    return b[target]
+
+// Advance one byte, updating line/col counters.
+fn lex_advance(l Lexer)
+    let b = l.bytes
+    let pos = l.pos
+    if pos >= b.len()
+        return
+    let ch = b[pos]
+    l.pos = pos + 1
+    if ch == 10  // '\n'
+        l.line = l.line + 1
+        l.col = 1
+    else
+        l.col = l.col + 1
+
+// ---------------------------------------------------------------------------
+// Section 4: Character classification
+// ---------------------------------------------------------------------------
+//
+// Yilt doesn't expose char literals, so we use byte values directly.
+// ASCII codes we care about:
+//   '0' = 48, '9' = 57
+//   'a' = 97, 'z' = 122
+//   'A' = 65, 'Z' = 90
+//   '_' = 95
+//   ' ' = 32, '\t' = 9, '\n' = 10, '\r' = 13
+//   '"' = 34, '\'' = 39
+//   '/' = 47, '*' = 42, '+' = 43, '-' = 45
+//   '<' = 60, '>' = 62, '=' = 61, '!' = 33
+//   '&' = 38, '|' = 124, '^' = 94, '~' = 126
+//   '(' = 40, ')' = 41, '{' = 123, '}' = 125
+//   '[' = 91, ']' = 93, ',' = 44, '.' = 46
+//   ':' = 58, ';' = 59, '?' = 63, '%' = 37
+
+fn is_digit(b int) bool
+    return b >= 48 and b <= 57
+
+fn is_hex_digit(b int) bool
+    return (b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102)
+
+fn is_alpha(b int) bool
+    return (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
+
+fn is_alnum(b int) bool
+    return is_alpha(b) or is_digit(b)
+
+fn is_space(b int) bool
+    return b == 32 or b == 9
+
+fn is_newline(b int) bool
+    return b == 10 or b == 13
+
+// ---------------------------------------------------------------------------
+// Section 5: Keyword table
+// ---------------------------------------------------------------------------
+
+// Maps identifier text to its token kind.  Built once at lexer construction.
+// Returns -1 if the text is not a keyword.
+fn keyword_kind(text str) int
+    if text == "let"
+        return T_LET
+    if text == "mut"
+        return T_MUT
+    if text == "fn"
+        return T_FN
+    if text == "extern"
+        return T_EXTERN
+    if text == "pub"
+        return T_PUB
+    if text == "use"
+        return T_USE
+    if text == "from"
+        return T_FROM
+    if text == "for"
+        return T_FOR
+    if text == "in"
+        return T_IN
+    if text == "if"
+        return T_IF
+    if text == "but"
+        return T_BUT
+    if text == "else"
+        return T_ELSE
+    if text == "while"
+        return T_WHILE
+    if text == "match"
+        return T_MATCH
+    if text == "case"
+        return T_CASE
+    if text == "default"
+        return T_DEFAULT
+    if text == "return"
+        return T_RETURN
+    if text == "break"
+        return T_BREAK
+    if text == "continue"
+        return T_CONTINUE
+    if text == "spawn"
+        return T_SPAWN
+    if text == "await"
+        return T_AWAIT
+    // 'const' removed (D001): everything is immutable by default, `mut` opts in.
+    if text == "assert"
+        return T_ASSERT
+    if text == "struct"
+        return T_STRUCT
+    if text == "enum"
+        return T_ENUM
+    if text == "and"
+        return T_AND
+    if text == "or"
+        return T_OR
+    if text == "not"
+        return T_NOT
+    if text == "true"
+        return T_TRUE
+    if text == "false"
+        return T_FALSE
+    if text == "nil"
+        return T_NIL
+    return -1
+
+// ---------------------------------------------------------------------------
+// Section 6: Token constructors
+// ---------------------------------------------------------------------------
+
+fn make_token(kind int, value str, line int, col int) Token
+    let mut t = Token{kind: kind, value: value, line: line, col: col}
+    return t
+
+// ---------------------------------------------------------------------------
+// Section 7: Indentation handling
+// ---------------------------------------------------------------------------
+//
+// Yilt uses Python-style indentation: blocks are introduced by an increase
+// in indentation level (in 4-space units) and terminated by a decrease.
+// The lexer emits INDENT tokens when the level increases and DEDENT tokens
+// when it decreases.
+//
+// This function is called at the start of each logical line (after skipping
+// blank lines and comments).  It counts leading spaces, computes the new
+// indentation level, and updates the indent stack.  It does NOT emit tokens
+// directly — instead it sets `pending_dedents` and returns whether an INDENT
+// is needed.  The main lex loop calls this and then emits the appropriate
+// tokens.
+//
+// Returns:
+//   -1 if this line is blank or comment-only (skip it, no tokens)
+//   0 if no indentation change (same level as previous line)
+//   1 if indentation increased (emit one INDENT token)
+//   The function also sets l.pending_dedents if DEDENT tokens are needed.
+
+fn handle_indent(l Lexer) int
+    // Count leading spaces.
+    let mut spaces = 0
+    while true
+        let ch = lex_peek(l)
+        if ch == 32  // space
+            spaces = spaces + 1
+            lex_advance(l)
+        but ch == 9  // tab — treat as error but count as 1 for now
+            spaces = spaces + 1
+            lex_advance(l)
+        else
+            break
+    // Check for blank line or comment-only line.
+    let ch = lex_peek(l)
+    if ch == -1
+        return -1
+    if ch == 10  // '\n'
+        lex_advance(l)
+        l.at_line_start = true
+        return -1
+    if ch == 13  // '\r'
+        lex_advance(l)
+        if lex_peek(l) == 10
+            lex_advance(l)
+        l.at_line_start = true
+        return -1
+    if ch == 47 and lex_peek_n(l, 1) == 47  // //
+        return -1
+    if ch == 47 and lex_peek_n(l, 1) == 42  // /*
+        return -1
+    // Validate 4-space indentation.
+    if spaces % 4 != 0
+        // For Stage 1 we just round down; the Go lexer emits an error.
+        // We'll add proper diagnostics in Stage 2.
+        spaces = (spaces / 4) * 4
+    let level = spaces / 4
+    // Compare with current top of stack.
+    let cur_level = l.indent_stack[l.indent_depth - 1]
+    if level == cur_level
+        return 0
+    if level > cur_level
+        // Indent: push new level.
+        l.indent_stack[l.indent_depth] = level
+        l.indent_depth = l.indent_depth + 1
+        return 1
+    // Dedent: pop levels until we reach `level`.
+    let mut count = 0
+    while l.indent_depth > 1 and l.indent_stack[l.indent_depth - 1] > level
+        l.indent_depth = l.indent_depth - 1
+        count = count + 1
+    l.pending_dedents = count
+    return 0
+
+// ---------------------------------------------------------------------------
+// Section 8: Whitespace and comment skipping
+// ---------------------------------------------------------------------------
+
+// Skip horizontal whitespace (spaces and tabs) on the current line.
+// Does NOT skip newlines — those are handled by the line-start logic.
+fn skip_horizontal_ws(l Lexer)
+    while true
+        let ch = lex_peek(l)
+        if ch == 32 or ch == 9
+            lex_advance(l)
+        else
+            break
+
+// Skip a // line comment.  Assumes we're positioned at the first '/'.
+// Consumes up to (but not including) the newline.
+fn skip_line_comment(l Lexer)
+    // Consume '//'
+    lex_advance(l)
+    lex_advance(l)
+    while true
+        let ch = lex_peek(l)
+        if ch == -1 or ch == 10  // EOF or '\n'
+            break
+        lex_advance(l)
+
+// Skip a /* block comment (with nesting support).  Assumes we're at the
+// first '/'.  Consumes through the matching '*/'.
+// Returns true if successfully skipped, false if unterminated.
+fn skip_block_comment(l Lexer) bool
+    // Consume '/*'
+    lex_advance(l)
+    lex_advance(l)
+    let mut depth = 1
+    while depth > 0
+        let ch = lex_peek(l)
+        if ch == -1
+            return false  // unterminated
+        if ch == 47 and lex_peek_n(l, 1) == 42  // /*
+            lex_advance(l)
+            lex_advance(l)
+            depth = depth + 1
+        but ch == 42 and lex_peek_n(l, 1) == 47  // */
+            lex_advance(l)
+            lex_advance(l)
+            depth = depth - 1
+        else
+            lex_advance(l)
+    return true
+
+// ---------------------------------------------------------------------------
+// Section 9: Literal lexing
+// ---------------------------------------------------------------------------
+
+// Lex an identifier or keyword.  Assumes we're at the first [a-zA-Z_].
+fn lex_identifier(l Lexer) Token
+    let line = l.line
+    let col = l.col
+    let start = l.pos
+    while true
+        let ch = lex_peek(l)
+        if ch == -1 or not is_alnum(ch)
+            break
+        lex_advance(l)
+    let end = l.pos
+    let text = l.src.substr(start, end)
+    let kw = keyword_kind(text)
+    if kw != -1
+        return make_token(kw, text, line, col)
+    return make_token(T_IDENT, text, line, col)
+
+// Lex a number literal (integer or float, with hex/bin/oct prefixes and
+// underscore separators).  Assumes we're at the first digit.
+fn lex_number(l Lexer) Token
+    let line = l.line
+    let col = l.col
+    let start = l.pos
+    // Check for hex/bin/oct prefix.
+    let ch = lex_peek(l)
+    if ch == 48  // '0'
+        let next = lex_peek_n(l, 1)
+        if next == 120 or next == 88  // 'x' or 'X' — hex
+            lex_advance(l)  // '0'
+            lex_advance(l)  // 'x'
+            while true
+                let c = lex_peek(l)
+                if is_hex_digit(c) or c == 95  // '_'
+                    lex_advance(l)
+                else
+                    break
+            let end = l.pos
+            return make_token(T_INT_LIT, l.src.substr(start, end), line, col)
+        if next == 98 or next == 66  // 'b' or 'B' — binary
+            lex_advance(l)
+            lex_advance(l)
+            while true
+                let c = lex_peek(l)
+                if c == 48 or c == 49 or c == 95  // '0', '1', '_'
+                    lex_advance(l)
+                else
+                    break
+            let end = l.pos
+            return make_token(T_INT_LIT, l.src.substr(start, end), line, col)
+        if next == 111 or next == 79  // 'o' or 'O' — octal
+            lex_advance(l)
+            lex_advance(l)
+            while true
+                let c = lex_peek(l)
+                if (c >= 48 and c <= 55) or c == 95  // '0'-'7' or '_'
+                    lex_advance(l)
+                else
+                    break
+            let end = l.pos
+            return make_token(T_INT_LIT, l.src.substr(start, end), line, col)
+    // Decimal integer or float.
+    let mut is_float = false
+    while true
+        let c = lex_peek(l)
+        if is_digit(c) or c == 95  // digit or '_'
+            lex_advance(l)
+        else
+            break
+    // Check for float: '.' followed by a digit.
+    if lex_peek(l) == 46  // '.'
+        let after = lex_peek_n(l, 1)
+        if is_digit(after)
+            is_float = true
+            lex_advance(l)  // '.'
+            while true
+                let c = lex_peek(l)
+                if is_digit(c) or c == 95
+                    lex_advance(l)
+                else
+                    break
+    let end = l.pos
+    let text = l.src.substr(start, end)
+    if is_float
+        return make_token(T_FLOAT_LIT, text, line, col)
+    return make_token(T_INT_LIT, text, line, col)
+
+// Lex a string escape sequence.  Assumes we're at the backslash.
+// Returns the decoded character as an integer byte value, or -1 on error.
+// Consumes the backslash and the escape character(s).
+fn lex_escape(l Lexer) int
+    // Consume backslash.
+    lex_advance(l)
+    let ch = lex_peek(l)
+    if ch == -1
+        return -1
+    lex_advance(l)
+    // Common escapes.
+    if ch == 110  // 'n'
+        return 10  // newline
+    if ch == 116  // 't'
+        return 9   // tab
+    if ch == 114  // 'r'
+        return 13  // CR
+    if ch == 48   // '0'
+        return 0   // null
+    if ch == 92   // '\\'
+        return 92
+    if ch == 34   // '"'
+        return 34
+    if ch == 39   // '\''
+        return 39
+    // Unknown escape: return the character literally (lenient).
+    return ch
+
+// Lex a string literal "...".  Assumes we're at the opening quote.
+// The token's `value` field holds the UNESCAPED content (e.g. for "a\nb",
+// value = "a<newline>b").
+fn lex_string(l Lexer) Token
+    let line = l.line
+    let col = l.col
+    lex_advance(l)  // consume opening '"'
+    let mut content = ""
+    while true
+        let ch = lex_peek(l)
+        if ch == -1 or ch == 10  // EOF or newline
+            // Unterminated string — emit what we have so far.
+            break
+        if ch == 34  // '"'
+            lex_advance(l)  // consume closing quote
+            break
+        if ch == 92  // backslash
+            let escaped = lex_escape(l)
+            if escaped == -1
+                break
+            content = content + byte_to_str(escaped)
+        else
+            content = content + byte_to_str(ch)
+            lex_advance(l)
+    return make_token(T_STRING_LIT, content, line, col)
+
+// Lex an f-string f"...{expr}...".  Assumes we're at the 'f'.
+// The token's `value` field holds the RAW content including {expr} segments
+// (the parser will interpret the {expr} parts later).
+fn lex_fstring(l Lexer) Token
+    let line = l.line
+    let col = l.col
+    lex_advance(l)  // consume 'f'
+    lex_advance(l)  // consume opening '"'
+    let mut content = ""
+    let mut depth = 0  // brace nesting inside {expr}
+    while true
+        let ch = lex_peek(l)
+        if ch == -1 or ch == 10  // EOF or newline
+            break
+        if ch == 34 and depth == 0  // closing '"'
+            lex_advance(l)
+            break
+        if ch == 92 and depth == 0  // backslash escape (only outside {expr})
+            let escaped = lex_escape(l)
+            if escaped == -1
+                break
+            content = content + byte_to_str(escaped)
+        but ch == 123  // '{'
+            depth = depth + 1
+            content = content + byte_to_str(ch)
+            lex_advance(l)
+        but ch == 125  // '}'
+            if depth > 0
+                depth = depth - 1
+            content = content + byte_to_str(ch)
+            lex_advance(l)
+        else
+            content = content + byte_to_str(ch)
+            lex_advance(l)
+    return make_token(T_INTERP_STR, content, line, col)
+
+// Helper for lex_char: process the character after the opening quote.
+// Extracted to avoid the parser's nested-if-then-else bug (see Stage 1
+// worklog).  Returns the decoded character value as a string.
+fn lex_char_inner(l Lexer) str
+    let ch = lex_peek(l)
+    if ch == 92  // backslash
+        let escaped = lex_escape(l)
+        if escaped != -1
+            return byte_to_str(escaped)
+        return ""
+    // Non-escape: take the character literally.
+    if ch != -1
+        let v = byte_to_str(ch)
+        lex_advance(l)
+        return v
+    return ""
+
+// Lex a character literal 'c' or '\n'.  Assumes we're at the opening quote.
+fn lex_char(l Lexer) Token
+    let line = l.line
+    let col = l.col
+    lex_advance(l)  // consume opening '\''
+    let value = lex_char_inner(l)
+    // Expect closing '\''
+    if lex_peek(l) == 39
+        lex_advance(l)
+    return make_token(T_CHAR_LIT, value, line, col)
+
+// ---------------------------------------------------------------------------
+// Section 10: Byte-to-string conversion
+// ---------------------------------------------------------------------------
+//
+// Yilt doesn't expose a chr() function or char literals, so we build a
+// lookup table of all 256 byte values mapped to single-character strings.
+// This is done once at program startup via .
+//
+// We use the module pattern: a global mutable table held inside a struct
+// field, initialised on first use.  Yilt doesn't allow top-level mutable
+// globals, so we wrap it in a function that returns the table (initialising
+// on first call).
+
+
+// ---------------------------------------------------------------------------
+// Section 11: Operator lexing
+// ---------------------------------------------------------------------------
+//
+// Operators are lexed by peeking at the current character and, where needed,
+// the next character to distinguish multi-char operators (e.g. '=' vs '==',
+// '<' vs '<=', '<<' vs '<<=').
+
+fn lex_operator(l Lexer) Token
+    let line = l.line
+    let col = l.col
+    let ch = lex_peek(l)
+    let next = lex_peek_n(l, 1)
+    // Two-character operators (check next char).
+    // Three-character operators (... and <<= >>=) checked first.
+    if ch == 46 and next == 46  // '..'
+        let n2 = lex_peek_n(l, 2)
+        if n2 == 46  // '...'
+            lex_advance(l)
+            lex_advance(l)
+            lex_advance(l)
+            return make_token(T_DOTDOTDOT, "...", line, col)
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_DOTDOT, "..", line, col)
+    if ch == 60 and next == 60  // '<<'
+        let n2 = lex_peek_n(l, 2)
+        if n2 == 61  // '<<='
+            lex_advance(l)
+            lex_advance(l)
+            lex_advance(l)
+            return make_token(T_SHL_EQ, "<<=", line, col)
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_LSHIFT, "<<", line, col)
+    if ch == 62 and next == 62  // '>>'
+        let n2 = lex_peek_n(l, 2)
+        if n2 == 61  // '>>='
+            lex_advance(l)
+            lex_advance(l)
+            lex_advance(l)
+            return make_token(T_SHR_EQ, ">>=", line, col)
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_RSHIFT, ">>", line, col)
+    if ch == 45 and next == 62  // '->'
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_ARROW, "->", line, col)
+    if ch == 43 and next == 43  // '++'
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_PLUS_PLUS, "++", line, col)
+    if ch == 45 and next == 45  // '--'
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_MINUS_MINUS, "--", line, col)
+    // Two-char ops with '='
+    if ch == 61 and next == 61  // '=='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_EQ, "==", line, col)
+    if ch == 33 and next == 61  // '!='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_NEQ, "!=", line, col)
+    if ch == 60 and next == 61  // '<='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_LE, "<=", line, col)
+    if ch == 62 and next == 61  // '>='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_GE, ">=", line, col)
+    if ch == 43 and next == 61  // '+='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_PLUS_EQ, "+=", line, col)
+    if ch == 45 and next == 61  // '-='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_MINUS_EQ, "-=", line, col)
+    if ch == 42 and next == 61  // '*='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_STAR_EQ, "*=", line, col)
+    if ch == 47 and next == 61  // '/='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_SLASH_EQ, "/=", line, col)
+    if ch == 37 and next == 61  // '%='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_PERCENT_EQ, "%=", line, col)
+    if ch == 38 and next == 61  // '&='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_AMP_EQ, "&=", line, col)
+    if ch == 124 and next == 61  // '|='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_PIPE_EQ, "|=", line, col)
+    if ch == 94 and next == 61  // '^='
+        lex_advance(l)
+        lex_advance(l)
+        return make_token(T_CARET_EQ, "^=", line, col)
+    // Single-char operators and delimiters.
+    lex_advance(l)
+    if ch == 43
+        return make_token(T_PLUS, "+", line, col)
+    if ch == 45
+        return make_token(T_MINUS, "-", line, col)
+    if ch == 42
+        return make_token(T_STAR, "*", line, col)
+    if ch == 47
+        return make_token(T_SLASH, "/", line, col)
+    if ch == 37
+        return make_token(T_PERCENT, "%", line, col)
+    if ch == 38
+        return make_token(T_AMP, "&", line, col)
+    if ch == 124
+        return make_token(T_PIPE, "|", line, col)
+    if ch == 94
+        return make_token(T_CARET, "^", line, col)
+    if ch == 126
+        return make_token(T_TILDE, "~", line, col)
+    if ch == 60
+        return make_token(T_LT, "<", line, col)
+    if ch == 62
+        return make_token(T_GT, ">", line, col)
+    if ch == 61
+        return make_token(T_ASSIGN, "=", line, col)
+    if ch == 63
+        return make_token(T_QUESTION, "?", line, col)
+    if ch == 40
+        return make_token(T_LPAREN, "(", line, col)
+    if ch == 41
+        return make_token(T_RPAREN, ")", line, col)
+    if ch == 123
+        return make_token(T_LBRACE, "{", line, col)
+    if ch == 125
+        return make_token(T_RBRACE, "}", line, col)
+    if ch == 91
+        return make_token(T_LBRACK, "[", line, col)
+    if ch == 93
+        return make_token(T_RBRACK, "]", line, col)
+    if ch == 44
+        return make_token(T_COMMA, ",", line, col)
+    if ch == 46
+        return make_token(T_PERIOD, ".", line, col)
+    if ch == 58
+        return make_token(T_COLON, ":", line, col)
+    if ch == 59
+        return make_token(T_SEMICOLON, ";", line, col)
+    // Unknown character — emit as a special token so the parser can report
+    // a clean error.  Use kind -1 to signal "unknown".
+    return make_token(-1, "?", line, col)
+
+// ---------------------------------------------------------------------------
+// Section 12: Main lexing loop
+// ---------------------------------------------------------------------------
+
+// Handle the line-start logic: indentation tracking and comment skipping.
+// Inline in lex_all — extracted version didn't work because Yilt passes
+// tables and ints by value, so mutations to `tokens` and `idx` in a
+// helper function were lost.  See Stage 1 worklog for details.
+
+// Lex the entire source.  Returns a table of Token structs (integer-keyed).
+// Also produces indentation tokens (INDENT/DEDENT) inline in the stream.
+fn lex_all(source str) table
+    
+    let mut l = lex_new(source)
+    let mut tokens = {}
+    let mut idx = 0
+    let mut done = false
+    while not done
+        // Handle line start: indentation tracking.
+        // We avoid nested if-then-else here because of a parser bug
+        // (see test_minimal5.yilt in the worklog).  Instead we use
+        // a flat sequence of if-continue blocks.
+        if l.at_line_start
+            l.at_line_start = false
+            let indent_result = handle_indent(l)
+            if indent_result == -1
+                // Blank or comment-only line.
+                let ch2 = lex_peek(l)
+                if ch2 == 47
+                    let n2 = lex_peek_n(l, 1)
+                    if n2 == 47
+                        skip_line_comment(l)
+                        l.at_line_start = true
+                    if n2 == 42
+                        skip_block_comment(l)
+                        l.at_line_start = true
+                continue
+            // Emit any pending DEDENT tokens first.
+            while l.pending_dedents > 0
+                tokens[idx] = make_token(T_DEDENT, "<dedent>", l.line, 1)
+                idx = idx + 1
+                l.pending_dedents = l.pending_dedents - 1
+            // Then emit INDENT if level increased.
+            if indent_result == 1
+                tokens[idx] = make_token(T_INDENT, "<indent>", l.line, 1)
+                idx = idx + 1
+        // Check for EOF.
+        let ch = lex_peek(l)
+        if ch == -1
+            // Emit final DEDENT tokens to close any open blocks.
+            while l.indent_depth > 1
+                l.indent_depth = l.indent_depth - 1
+                tokens[idx] = make_token(T_DEDENT, "<dedent>", l.line, 1)
+                idx = idx + 1
+            tokens[idx] = make_token(T_EOF, "<eof>", l.line, l.col)
+            done = true
+            continue
+        // Skip horizontal whitespace.
+        if ch == 32 or ch == 9
+            lex_advance(l)
+            continue
+        // Handle newlines.
+        if ch == 10
+            lex_advance(l)
+            l.at_line_start = true
+            continue
+        if ch == 13
+            lex_advance(l)
+            if lex_peek(l) == 10
+                lex_advance(l)
+            l.at_line_start = true
+            continue
+        // Handle comments.
+        if ch == 47
+            let n = lex_peek_n(l, 1)
+            if n == 47
+                skip_line_comment(l)
+                continue
+            if n == 42
+                skip_block_comment(l)
+                continue
+        // Handle f-string: identifier 'f' followed by '"'.
+        if is_alpha(ch) and ch == 102
+            let next = lex_peek_n(l, 1)
+            if next == 34
+                let tok = lex_fstring(l)
+                tokens[idx] = tok
+                idx = idx + 1
+                continue
+        // Identifiers and keywords.
+        if is_alpha(ch)
+            let tok = lex_identifier(l)
+            tokens[idx] = tok
+            idx = idx + 1
+            continue
+        // Numeric literals.
+        if is_digit(ch)
+            let tok = lex_number(l)
+            tokens[idx] = tok
+            idx = idx + 1
+            continue
+        // String literals.
+        if ch == 34
+            let tok = lex_string(l)
+            tokens[idx] = tok
+            idx = idx + 1
+            continue
+        // Char literals.
+        if ch == 39
+            let tok = lex_char(l)
+            tokens[idx] = tok
+            idx = idx + 1
+            continue
+        // Operators and delimiters.
+        let tok = lex_operator(l)
+        tokens[idx] = tok
+        idx = idx + 1
+    return tokens
+
+// ---------------------------------------------------------------------------
+// Section 13: Token pretty-printing (for testing)
+// ---------------------------------------------------------------------------
+
+// Map a token kind to a human-readable name for debug output.
+fn token_kind_name(kind int) str
+    if kind == T_EOF
+        return "EOF"
+    if kind == T_IDENT
+        return "IDENT"
+    if kind == T_INT_LIT
+        return "INT"
+    if kind == T_FLOAT_LIT
+        return "FLOAT"
+    if kind == T_STRING_LIT
+        return "STRING"
+    if kind == T_NIL
+        return "nil"
+    if kind == T_LET
+        return "let"
+    if kind == T_MUT
+        return "mut"
+    if kind == T_FN
+        return "fn"
+    if kind == T_EXTERN
+        return "extern"
+    if kind == T_PUB
+        return "pub"
+    if kind == T_USE
+        return "use"
+    if kind == T_FROM
+        return "from"
+    if kind == T_FOR
+        return "for"
+    if kind == T_IN
+        return "in"
+    if kind == T_IF
+        return "if"
+    if kind == T_BUT
+        return "but"
+    if kind == T_ELSE
+        return "else"
+    if kind == T_WHILE
+        return "while"
+    if kind == T_MATCH
+        return "match"
+    if kind == T_CASE
+        return "case"
+    if kind == T_DEFAULT
+        return "default"
+    if kind == T_RETURN
+        return "return"
+    if kind == T_BREAK
+        return "break"
+    if kind == T_CONTINUE
+        return "continue"
+    if kind == T_SPAWN
+        return "spawn"
+    if kind == T_AWAIT
+        return "await"
+    if kind == T_CONST
+        return "const"
+    if kind == T_ASSERT
+        return "assert"
+    if kind == T_STRUCT
+        return "struct"
+    if kind == T_ENUM
+        return "enum"
+    if kind == T_PLUS
+        return "+"
+    if kind == T_MINUS
+        return "-"
+    if kind == T_STAR
+        return "*"
+    if kind == T_SLASH
+        return "/"
+    if kind == T_PERCENT
+        return "%"
+    if kind == T_AMP
+        return "&"
+    if kind == T_PIPE
+        return "|"
+    if kind == T_CARET
+        return "^"
+    if kind == T_TILDE
+        return "~"
+    if kind == T_LSHIFT
+        return "<<"
+    if kind == T_RSHIFT
+        return ">>"
+    if kind == T_EQ
+        return "=="
+    if kind == T_NEQ
+        return "!="
+    if kind == T_LT
+        return "<"
+    if kind == T_LE
+        return "<="
+    if kind == T_GT
+        return ">"
+    if kind == T_GE
+        return ">="
+    if kind == T_ASSIGN
+        return "="
+    if kind == T_PLUS_EQ
+        return "+="
+    if kind == T_MINUS_EQ
+        return "-="
+    if kind == T_STAR_EQ
+        return "*="
+    if kind == T_SLASH_EQ
+        return "/="
+    if kind == T_PERCENT_EQ
+        return "%="
+    if kind == T_AMP_EQ
+        return "&="
+    if kind == T_PIPE_EQ
+        return "|="
+    if kind == T_CARET_EQ
+        return "^="
+    if kind == T_SHL_EQ
+        return "<<="
+    if kind == T_SHR_EQ
+        return ">>="
+    if kind == T_QUESTION
+        return "?"
+    if kind == T_LPAREN
+        return "("
+    if kind == T_RPAREN
+        return ")"
+    if kind == T_LBRACE
+        return "{"
+    if kind == T_RBRACE
+        return "}"
+    if kind == T_LBRACK
+        return "["
+    if kind == T_RBRACK
+        return "]"
+    if kind == T_COMMA
+        return ","
+    if kind == T_PERIOD
+        return "."
+    if kind == T_COLON
+        return ":"
+    if kind == T_DOTDOT
+        return ".."
+    if kind == T_DOTDOTDOT
+        return "..."
+    if kind == T_ARROW
+        return "->"
+    if kind == T_PLUS_PLUS
+        return "++"
+    if kind == T_MINUS_MINUS
+        return "--"
+    if kind == T_TRUE
+        return "true"
+    if kind == T_FALSE
+        return "false"
+    if kind == T_AND
+        return "and"
+    if kind == T_OR
+        return "or"
+    if kind == T_NOT
+        return "not"
+    if kind == T_INTERP_STR
+        return "FSTRING"
+    if kind == T_CHAR_LIT
+        return "CHAR"
+    if kind == T_INDENT
+        return "INDENT"
+    if kind == T_DEDENT
+        return "DEDENT"
+    if kind == T_NEWLINE
+        return "NEWLINE"
+    if kind == T_SEMICOLON
+        return ";"
+    return "UNKNOWN"
+
+// ---------------------------------------------------------------------------
+// Section 14: Main entry point
+// ---------------------------------------------------------------------------
+
+fn main() int
+    print("=== Yilt Self-Host Stage 1: Full Yilt Lexer ===")
+    print("")
+    
+    // Test source — a representative Yilt program exercising most lexer features.
+    let src = "fn add(a int, b int) int\n    return a + b\n\npub fn main() int\n    let x = add(1, 2)\n    print(x)\n    let s = \"hello\"\n    let f = f\"val={x}\"\n    return 0\n"
+    
+    print("Source:")
+    print(src)
+    print("---")
+    print("Tokens:")
+    print("")
+    
+    let tokens = lex_all(src)
+    let mut i = 0
+    while i < tokens.len()
+        let t = tokens[i]
+        let kind_name = token_kind_name(t.kind)
+        // Format: [line:col] KIND "value"
+        print("[")
+        print(t.line)
+        print(":")
+        print(t.col)
+        print("] ")
+        print(kind_name)
+        print(" \"")
+        print(t.value)
+        print("\"")
+        i = i + 1
+    
+    print("")
+    print("=== Stage 1 complete ===")
+    print("Total tokens: ")
+    print(tokens.len())
+    return 0

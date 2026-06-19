@@ -1,0 +1,1395 @@
+// ===========================================================================
+// Yilt Self-Host Compiler — Stage 2: Yilt Parser
+// ===========================================================================
+//
+// A recursive-descent + Pratt parser for Yilt, written in Yilt.
+// Consumes the token stream from Stage 1 and builds an AST.
+//
+// AST nodes are Node structs with a "kind" string discriminator.  Child
+// nodes are wrapped in single-element tables (Yilt doesn't support recursive
+// structs yet).  Lists of children use integer-keyed tables.
+//
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Section 1: Token kinds (must match Stage 1)
+// ---------------------------------------------------------------------------
+
+let T_EOF = 0
+let T_IDENT = 1
+let T_INT_LIT = 2
+let T_FLOAT_LIT = 3
+let T_STRING_LIT = 4
+let T_NIL = 5
+let T_LET = 6
+let T_MUT = 7
+let T_FN = 8
+let T_EXTERN = 9
+let T_PUB = 10
+let T_USE = 11
+let T_FROM = 12
+let T_FOR = 13
+let T_IN = 14
+let T_IF = 15
+let T_BUT = 16
+let T_ELSE = 17
+let T_WHILE = 18
+let T_MATCH = 19
+let T_CASE = 20
+let T_DEFAULT = 21
+let T_RETURN = 22
+let T_BREAK = 23
+let T_CONTINUE = 24
+let T_SPAWN = 25
+let T_AWAIT = 26
+let T_CONST = 27
+let T_ASSERT = 28
+let T_STRUCT = 29
+let T_ENUM = 30
+let T_PLUS = 31
+let T_MINUS = 32
+let T_STAR = 33
+let T_SLASH = 34
+let T_PERCENT = 35
+let T_AMP = 36
+let T_PIPE = 37
+let T_CARET = 38
+let T_TILDE = 39
+let T_LSHIFT = 40
+let T_RSHIFT = 41
+let T_EQ = 42
+let T_NEQ = 43
+let T_LT = 44
+let T_LE = 45
+let T_GT = 46
+let T_GE = 47
+let T_ASSIGN = 48
+let T_PLUS_EQ = 49
+let T_MINUS_EQ = 50
+let T_STAR_EQ = 51
+let T_SLASH_EQ = 52
+let T_PERCENT_EQ = 53
+let T_AMP_EQ = 54
+let T_PIPE_EQ = 55
+let T_CARET_EQ = 56
+let T_SHL_EQ = 57
+let T_SHR_EQ = 58
+let T_QUESTION = 59
+let T_LPAREN = 60
+let T_RPAREN = 61
+let T_LBRACE = 62
+let T_RBRACE = 63
+let T_LBRACK = 64
+let T_RBRACK = 65
+let T_COMMA = 66
+let T_PERIOD = 67
+let T_COLON = 68
+let T_DOTDOT = 69
+let T_DOTDOTDOT = 70
+let T_ARROW = 71
+let T_PLUS_PLUS = 72
+let T_MINUS_MINUS = 73
+let T_TRUE = 74
+let T_FALSE = 75
+let T_AND = 76
+let T_OR = 77
+let T_NOT = 78
+let T_INTERP_STR = 79
+let T_CHAR_LIT = 80
+let T_INDENT = 81
+let T_DEDENT = 82
+let T_NEWLINE = 83
+
+// ---------------------------------------------------------------------------
+// Section 2: Data structures
+// ---------------------------------------------------------------------------
+
+struct Token
+    mut kind int
+    mut value str
+    mut line int
+    mut col int
+
+// AST node.  Uses a tagged-union-via-struct pattern (like C).
+// `kind` is the discriminator.  Other fields are used depending on kind:
+//   - sval: string values (names, operators, literal text)
+//   - ival: integer values
+//   - bval: boolean flags (pub, mutable)
+//   - a, b, c: single children wrapped as {0: Node}
+//   - list: integer-keyed table of Node (body, params, args, entries)
+//   - extra: miscellaneous data (ret_type string, etc.)
+struct Node
+    mut kind str
+    mut sval str
+    mut ival int
+    mut bval bool
+    mut a table
+    mut b table
+    mut c table
+    mut list table
+    mut extra str
+
+struct Parser
+    mut tokens table
+    mut pos int
+    mut ntokens int
+    mut errors table
+    mut nerrors int
+
+struct ParseResult
+    mut decls table
+    mut errors table
+    mut nerrors int
+
+// ---------------------------------------------------------------------------
+// Section 3: Node constructors
+// ---------------------------------------------------------------------------
+
+fn n_str(kind str, sval str) Node
+    let mut n = Node{kind: kind, sval: sval, ival: 0, bval: false, a: {}, b: {}, c: {}, list: {}, extra: ""}
+    return n
+
+fn n_kind(kind str) Node
+    let mut n = Node{kind: kind, sval: "", ival: 0, bval: false, a: {}, b: {}, c: {}, list: {}, extra: ""}
+    return n
+
+fn n_binary(op str, left Node, right Node) Node
+    let mut la = {}
+    la[0] = left
+    let mut rb = {}
+    rb[0] = right
+    let mut n = Node{kind: "binary", sval: op, ival: 0, bval: false, a: la, b: rb, c: {}, list: {}, extra: ""}
+    return n
+
+fn n_unary(op str, operand Node) Node
+    let mut oa = {}
+    oa[0] = operand
+    let mut n = Node{kind: "unary", sval: op, ival: 0, bval: false, a: oa, b: {}, c: {}, list: {}, extra: ""}
+    return n
+
+fn n_call(func Node, args table) Node
+    let mut fa = {}
+    fa[0] = func
+    let mut n = Node{kind: "call", sval: "", ival: 0, bval: false, a: fa, b: {}, c: {}, list: args, extra: ""}
+    return n
+
+fn n_member(obj Node, field str) Node
+    let mut oa = {}
+    oa[0] = obj
+    let mut n = Node{kind: "member", sval: field, ival: 0, bval: false, a: oa, b: {}, c: {}, list: {}, extra: ""}
+    return n
+
+fn n_index(obj Node, index Node) Node
+    let mut oa = {}
+    oa[0] = obj
+    let mut ib = {}
+    ib[0] = index
+    let mut n = Node{kind: "index", sval: "", ival: 0, bval: false, a: oa, b: ib, c: {}, list: {}, extra: ""}
+    return n
+
+// ---------------------------------------------------------------------------
+// Section 4: Parser construction and token access
+// ---------------------------------------------------------------------------
+
+fn parser_new(tokens table) Parser
+    let mut p = Parser{tokens: tokens, pos: 0, ntokens: tokens.len(), errors: {}, nerrors: 0}
+    return p
+
+fn p_peek(p Parser) Token
+    if p.pos >= p.ntokens
+        return Token{kind: T_EOF, value: "<eof>", line: 0, col: 0}
+    return p.tokens[p.pos]
+
+fn p_peek_kind(p Parser) int
+    let t = p_peek(p)
+    return t.kind
+
+fn p_advance(p Parser) Token
+    let t = p_peek(p)
+    p.pos = p.pos + 1
+    return t
+
+fn p_at(p Parser, kind int) bool
+    return p_peek_kind(p) == kind
+
+fn p_expect(p Parser, kind int, what str) Token
+    if p_at(p, kind)
+        return p_advance(p)
+    p_error(p, "expected " + what)
+    return Token{kind: T_EOF, value: "<eof>", line: 0, col: 0}
+
+fn p_skip_indent(p Parser)
+    let mut done = false
+    while not done
+        if p_at(p, T_INDENT) or p_at(p, T_NEWLINE)
+            p_advance(p)
+        if not p_at(p, T_INDENT) and not p_at(p, T_NEWLINE)
+            done = true
+
+// p_skip_all_indent skips INDENT, DEDENT, and NEWLINE — use only between
+// top-level declarations where block structure doesn't matter.
+fn p_skip_all_indent(p Parser)
+    let mut done = false
+    while not done
+        if p_at(p, T_INDENT) or p_at(p, T_DEDENT) or p_at(p, T_NEWLINE)
+            p_advance(p)
+        if not p_at(p, T_INDENT) and not p_at(p, T_DEDENT) and not p_at(p, T_NEWLINE)
+            done = true
+
+fn p_error(p Parser, msg str)
+    let t = p_peek(p)
+    let mut m = "["
+    m = m + int_to_str(t.line)
+    m = m + ":"
+    m = m + int_to_str(t.col)
+    m = m + "] "
+    m = m + msg
+    p.errors[p.nerrors] = m
+    p.nerrors = p.nerrors + 1
+
+let g_printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+fn int_to_str(n int) str
+    if n == 0
+        return "0"
+    let mut neg = false
+    let mut v = n
+    if v < 0
+        neg = true
+        v = -v
+    let mut digits = ""
+    while v > 0
+        let d = v % 10
+        let ch = g_printable.substr(d + 48 - 32, d + 49 - 32)
+        digits = ch + digits
+        v = v / 10
+    if neg
+        digits = "-" + digits
+    return digits
+
+// ---------------------------------------------------------------------------
+// Section 5: Declaration parsing
+// ---------------------------------------------------------------------------
+
+fn parse_decl(p Parser) Node
+    p_skip_all_indent(p)
+    let kind = p_peek_kind(p)
+    if kind == T_PUB
+        p_advance(p)
+        return parse_pub_decl(p)
+    if kind == T_FN
+        return parse_fn_decl(p, false)
+    if kind == T_EXTERN
+        return parse_extern_decl(p)
+    if kind == T_STRUCT
+        return parse_struct_decl(p, false)
+    if kind == T_ENUM
+        return parse_enum_decl(p, false)
+    if kind == T_LET
+        return parse_top_let(p)
+    // 'const' removed (D001): top-level `let` handles constant bindings.
+    if kind == T_USE
+        return parse_use_decl(p)
+    if kind == T_FROM
+        return parse_from_decl(p)
+    if kind == T_EOF
+        return n_kind("eof")
+    p_error(p, "unexpected token in declaration")
+    p_advance(p)
+    return n_kind("error")
+
+fn parse_pub_decl(p Parser) Node
+    let kind = p_peek_kind(p)
+    if kind == T_FN
+        return parse_fn_decl(p, true)
+    if kind == T_STRUCT
+        return parse_struct_decl(p, true)
+    if kind == T_ENUM
+        return parse_enum_decl(p, true)
+    p_error(p, "expected fn/struct/enum after pub")
+    return n_kind("error")
+
+fn parse_fn_decl(p Parser, is_pub bool) Node
+    p_expect(p, T_FN, "'fn'")
+    let name_tok = p_expect(p, T_IDENT, "function name")
+    let mut type_params = {}
+    if p_at(p, T_LBRACK)
+        p_advance(p)
+        let mut idx = 0
+        let mut done = false
+        while not done
+            if p_at(p, T_RBRACK) or p_at(p, T_EOF)
+                done = true
+            if not done
+                if idx > 0
+                    p_expect(p, T_COMMA, "','")
+                let tp = p_expect(p, T_IDENT, "type param")
+                type_params[idx] = tp.value
+                idx = idx + 1
+        p_expect(p, T_RBRACK, "']'")
+    p_expect(p, T_LPAREN, "'('")
+    let params = parse_params(p)
+    p_expect(p, T_RPAREN, "')'")
+    let mut ret_type = ""
+    if p_at(p, T_IDENT)
+        let rt = p_advance(p)
+        ret_type = rt.value
+    let body = parse_block(p)
+    let mut n = Node{kind: "fn_decl", sval: name_tok.value, ival: 0, bval: is_pub, a: {}, b: {}, c: {}, list: {}, extra: ret_type}
+    n.list = body
+    n.a = params
+    n.b = type_params
+    return n
+
+fn parse_extern_decl(p Parser) Node
+    p_expect(p, T_EXTERN, "'extern'")
+    p_expect(p, T_FN, "'fn'")
+    let name_tok = p_expect(p, T_IDENT, "function name")
+    p_expect(p, T_LPAREN, "'('")
+    let params = parse_params(p)
+    p_expect(p, T_RPAREN, "')'")
+    let mut ret_type = ""
+    if p_at(p, T_IDENT)
+        let rt = p_advance(p)
+        ret_type = rt.value
+    let mut n = Node{kind: "extern_decl", sval: name_tok.value, ival: 0, bval: false, a: params, b: {}, c: {}, list: {}, extra: ret_type}
+    return n
+
+fn parse_params(p Parser) table
+    let mut params = {}
+    let mut idx = 0
+    let mut done = false
+    while not done
+        if p_at(p, T_RPAREN) or p_at(p, T_EOF)
+            done = true
+        if not done
+            if idx > 0
+                p_expect(p, T_COMMA, "','")
+            let mut mutable = false
+            if p_at(p, T_MUT)
+                p_advance(p)
+                mutable = true
+            let name_tok = p_expect(p, T_IDENT, "parameter name")
+            let mut ptype = ""
+            let mut variadic = false
+            if p_at(p, T_DOTDOTDOT)
+                p_advance(p)
+                variadic = true
+            if p_at(p, T_IDENT)
+                let tt = p_advance(p)
+                ptype = tt.value
+            let mut default_expr = n_kind("nil")
+            let mut has_default = false
+            if p_at(p, T_ASSIGN)
+                p_advance(p)
+                default_expr = parse_expr(p)
+                has_default = true
+            let mut param = Node{kind: "param", sval: name_tok.value, ival: 0, bval: mutable, a: {}, b: {}, c: {}, list: {}, extra: ptype}
+            if variadic
+                param.bval = true
+            if has_default
+                let mut da = {}
+                da[0] = default_expr
+                param.a = da
+            params[idx] = param
+            idx = idx + 1
+    return params
+
+fn parse_struct_decl(p Parser, is_pub bool) Node
+    p_expect(p, T_STRUCT, "'struct'")
+    let name_tok = p_expect(p, T_IDENT, "struct name")
+    let fields = parse_struct_body(p)
+    let mut n = Node{kind: "struct_decl", sval: name_tok.value, ival: 0, bval: is_pub, a: {}, b: {}, c: {}, list: fields, extra: ""}
+    return n
+
+// parse_struct_body parses a struct body: a sequence of field declarations,
+// each of the form `[mut] name type`.  Fields are separated by newlines.
+// Returns a table of Node (kind="field") indexed by integer.
+fn parse_struct_body(p Parser) table
+    let mut fields = {}
+    let mut idx = 0
+    if p_at(p, T_INDENT)
+        p_advance(p)
+    let mut done = false
+    while not done
+        p_skip_indent(p)
+        if p_at(p, T_DEDENT) or p_at(p, T_EOF)
+            done = true
+        if not done
+            // Parse: [mut] name type
+            let mut mutable = false
+            if p_at(p, T_MUT)
+                p_advance(p)
+                mutable = true
+            let name_tok = p_expect(p, T_IDENT, "field name")
+            let mut ftype = ""
+            if p_at(p, T_IDENT)
+                let tt = p_advance(p)
+                ftype = tt.value
+            let mut n = Node{kind: "field", sval: name_tok.value, ival: 0, bval: mutable, a: {}, b: {}, c: {}, list: {}, extra: ftype}
+            fields[idx] = n
+            idx = idx + 1
+    if p_at(p, T_DEDENT)
+        p_advance(p)
+    return fields
+
+fn parse_enum_decl(p Parser, is_pub bool) Node
+    p_expect(p, T_ENUM, "'enum'")
+    let name_tok = p_expect(p, T_IDENT, "enum name")
+    let variants = parse_block(p)
+    let mut n = Node{kind: "enum_decl", sval: name_tok.value, ival: 0, bval: is_pub, a: {}, b: {}, c: {}, list: variants, extra: ""}
+    return n
+
+fn parse_top_let(p Parser) Node
+    p_expect(p, T_LET, "'let'")
+    let mut mutable = false
+    if p_at(p, T_MUT)
+        p_advance(p)
+        mutable = true
+    let name_tok = p_expect(p, T_IDENT, "variable name")
+    let mut vtype = ""
+    if p_at(p, T_IDENT)
+        let tt = p_advance(p)
+        vtype = tt.value
+    p_expect(p, T_ASSIGN, "'='")
+    let value = parse_expr(p)
+    let mut va = {}
+    va[0] = value
+    let mut n = Node{kind: "let_decl", sval: name_tok.value, ival: 0, bval: mutable, a: va, b: {}, c: {}, list: {}, extra: vtype}
+    return n
+
+fn parse_top_const(p Parser) Node
+    p_expect(p, T_CONST, "'const'")
+    let name_tok = p_expect(p, T_IDENT, "const name")
+    p_expect(p, T_ASSIGN, "'='")
+    let value = parse_expr(p)
+    let mut va = {}
+    va[0] = value
+    let mut n = Node{kind: "const_decl", sval: name_tok.value, ival: 0, bval: false, a: va, b: {}, c: {}, list: {}, extra: ""}
+    return n
+
+fn parse_use_decl(p Parser) Node
+    p_expect(p, T_USE, "'use'")
+    let mod_tok = p_expect(p, T_IDENT, "module name")
+    let mut alias = mod_tok.value
+    if p_at(p, T_IDENT)
+        let as_tok = p_advance(p)
+        if as_tok.value == "as"
+            let a = p_expect(p, T_IDENT, "alias")
+            alias = a.value
+    let mut n = Node{kind: "use_decl", sval: mod_tok.value, ival: 0, bval: false, a: {}, b: {}, c: {}, list: {}, extra: alias}
+    return n
+
+fn parse_from_decl(p Parser) Node
+    p_expect(p, T_FROM, "'from'")
+    let mod_tok = p_expect(p, T_IDENT, "module name")
+    p_expect(p, T_USE, "'use'")
+    let mut syms = {}
+    let mut idx = 0
+    let mut done = false
+    while not done
+        if not p_at(p, T_IDENT)
+            done = true
+        if not done
+            let s = p_advance(p)
+            let mut alias = s.value
+            if p_at(p, T_IDENT)
+                let as_tok = p_advance(p)
+                if as_tok.value == "as"
+                    let a = p_expect(p, T_IDENT, "alias")
+                    alias = a.value
+            let mut sym = Node{kind: "sym", sval: s.value, ival: 0, bval: false, a: {}, b: {}, c: {}, list: {}, extra: alias}
+            syms[idx] = sym
+            idx = idx + 1
+            if p_at(p, T_COMMA)
+                p_advance(p)
+    let mut n = Node{kind: "from_decl", sval: mod_tok.value, ival: 0, bval: false, a: {}, b: {}, c: {}, list: syms, extra: ""}
+    return n
+
+// ---------------------------------------------------------------------------
+// Section 6: Block and statement parsing
+// ---------------------------------------------------------------------------
+
+fn parse_block(p Parser) table
+    let mut stmts = {}
+    let mut idx = 0
+    if p_at(p, T_INDENT)
+        p_advance(p)
+    let mut done = false
+    while not done
+        p_skip_indent(p)
+        if p_at(p, T_DEDENT) or p_at(p, T_EOF)
+            done = true
+        if not done
+            let s = parse_stmt(p)
+            stmts[idx] = s
+            idx = idx + 1
+    if p_at(p, T_DEDENT)
+        p_advance(p)
+    return stmts
+
+fn parse_stmt(p Parser) Node
+    let kind = p_peek_kind(p)
+    if kind == T_LET
+        return parse_let_stmt(p)
+    if kind == T_RETURN
+        return parse_return_stmt(p)
+    if kind == T_IF
+        return parse_if_stmt(p)
+    if kind == T_WHILE
+        return parse_while_stmt(p)
+    if kind == T_FOR
+        return parse_for_stmt(p)
+    if kind == T_MATCH
+        return parse_match_stmt(p)
+    if kind == T_BREAK
+        p_advance(p)
+        return n_kind("break")
+    if kind == T_CONTINUE
+        p_advance(p)
+        return n_kind("continue")
+    if kind == T_ASSERT
+        return parse_assert_stmt(p)
+    if kind == T_PUB
+        p_advance(p)
+        return parse_fn_decl(p, true)
+    if kind == T_FN
+        return parse_fn_decl(p, false)
+    let e = parse_expr(p)
+    if p_at(p, T_ASSIGN)
+        p_advance(p)
+        let val = parse_expr(p)
+        let mut ea = {}
+        ea[0] = e
+        let mut va = {}
+        va[0] = val
+        let mut n = Node{kind: "assign", sval: "", ival: 0, bval: false, a: ea, b: va, c: {}, list: {}, extra: ""}
+        return n
+    let mut ea = {}
+    ea[0] = e
+    let mut n = Node{kind: "expr_stmt", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
+    return n
+
+fn parse_let_stmt(p Parser) Node
+    p_expect(p, T_LET, "'let'")
+    let mut mutable = false
+    if p_at(p, T_MUT)
+        p_advance(p)
+        mutable = true
+    if p_at(p, T_LPAREN)
+        p_advance(p)
+        let mut names = {}
+        let mut idx = 0
+        let mut done = false
+        while not done
+            if p_at(p, T_RPAREN) or p_at(p, T_EOF)
+                done = true
+            if not done
+                if idx > 0
+                    p_expect(p, T_COMMA, "','")
+                    if p_at(p, T_RPAREN)
+                        done = true
+                if not done
+                    let nt = p_expect(p, T_IDENT, "variable name")
+                    names[idx] = nt.value
+                    idx = idx + 1
+        p_expect(p, T_RPAREN, "')'")
+        p_expect(p, T_ASSIGN, "'='")
+        let value = parse_expr(p)
+        let mut va = {}
+        va[0] = value
+        let mut n = Node{kind: "let_tuple", sval: "", ival: 0, bval: mutable, a: va, b: {}, c: {}, list: names, extra: ""}
+        return n
+    let name_tok = p_expect(p, T_IDENT, "variable name")
+    let mut vtype = ""
+    if p_at(p, T_IDENT)
+        let tt = p_advance(p)
+        vtype = tt.value
+    p_expect(p, T_ASSIGN, "'='")
+    let value = parse_expr(p)
+    let mut va = {}
+    va[0] = value
+    let mut n = Node{kind: "let_stmt", sval: name_tok.value, ival: 0, bval: mutable, a: va, b: {}, c: {}, list: {}, extra: vtype}
+    return n
+
+fn parse_return_stmt(p Parser) Node
+    p_expect(p, T_RETURN, "'return'")
+    let k = p_peek_kind(p)
+    if k == T_DEDENT or k == T_EOF or k == T_INDENT
+        return n_kind("return")
+    if k == T_INT_LIT or k == T_FLOAT_LIT or k == T_STRING_LIT or k == T_IDENT or k == T_LPAREN or k == T_TRUE or k == T_FALSE or k == T_NIL or k == T_MINUS or k == T_NOT or k == T_LBRACE or k == T_LBRACK or k == T_IF or k == T_MATCH
+        let val = parse_expr(p)
+        let mut va = {}
+        va[0] = val
+        let mut n = Node{kind: "return", sval: "", ival: 0, bval: false, a: va, b: {}, c: {}, list: {}, extra: ""}
+        return n
+    return n_kind("return")
+
+fn parse_if_stmt(p Parser) Node
+    p_expect(p, T_IF, "'if'")
+    let cond = parse_expr(p)
+    let then_block = parse_block(p)
+    let mut branches = {}
+    let mut b0 = {}
+    b0[0] = cond
+    branches[0] = make_branch(b0, then_block)
+    let mut nbranches = 1
+    let mut else_block = {}
+    let mut done = false
+    while not done
+        let k = p_peek_kind(p)
+        if k == T_BUT
+            p_advance(p)
+            let c = parse_expr(p)
+            let b = parse_block(p)
+            let mut cb = {}
+            cb[0] = c
+            branches[nbranches] = make_branch(cb, b)
+            nbranches = nbranches + 1
+        but k == T_ELSE
+            p_advance(p)
+            else_block = parse_block(p)
+            done = true
+        else
+            done = true
+    let mut n = Node{kind: "if_stmt", sval: "", ival: 0, bval: false, a: {}, b: {}, c: {}, list: branches, extra: ""}
+    n.a = else_block
+    return n
+
+fn make_branch(cond table, block table) Node
+    let mut n = Node{kind: "branch", sval: "", ival: 0, bval: false, a: cond, b: block, c: {}, list: {}, extra: ""}
+    return n
+
+fn parse_while_stmt(p Parser) Node
+    p_expect(p, T_WHILE, "'while'")
+    let cond = parse_expr(p)
+    let body = parse_block(p)
+    let mut ca = {}
+    ca[0] = cond
+    let mut n = Node{kind: "while_stmt", sval: "", ival: 0, bval: false, a: ca, b: {}, c: {}, list: body, extra: ""}
+    return n
+
+fn parse_for_stmt(p Parser) Node
+    p_expect(p, T_FOR, "'for'")
+    let key_tok = p_expect(p, T_IDENT, "loop variable")
+    let mut val_name = ""
+    if p_at(p, T_COMMA)
+        p_advance(p)
+        let v = p_expect(p, T_IDENT, "value variable")
+        val_name = v.value
+    p_expect(p, T_IN, "'in'")
+    let low = parse_expr(p)
+    let mut is_range = false
+    let mut high = n_kind("empty")
+    if p_at(p, T_DOTDOT)
+        is_range = true
+        p_advance(p)
+        high = parse_expr(p)
+    let body = parse_block(p)
+    let mut ia = {}
+    ia[0] = low
+    let mut rb = {}
+    if is_range
+        rb[0] = high
+    let mut n = Node{kind: "for_stmt", sval: key_tok.value, ival: 0, bval: is_range, a: ia, b: rb, c: {}, list: body, extra: val_name}
+    return n
+
+fn parse_match_stmt(p Parser) Node
+    p_expect(p, T_MATCH, "'match'")
+    let subj = parse_expr(p)
+    let mut cases = {}
+    let mut idx = 0
+    let mut default_block = {}
+    if p_at(p, T_INDENT)
+        p_advance(p)
+    let mut done = false
+    while not done
+        p_skip_indent(p)
+        if p_at(p, T_DEDENT) or p_at(p, T_EOF)
+            done = true
+        if not done
+            if p_at(p, T_CASE)
+                p_advance(p)
+                let pat = parse_expr(p)
+                let body = parse_block(p)
+                let mut pa = {}
+                pa[0] = pat
+                let mut c = Node{kind: "case", sval: "", ival: 0, bval: false, a: pa, b: body, c: {}, list: {}, extra: ""}
+                cases[idx] = c
+                idx = idx + 1
+            if p_at(p, T_DEFAULT)
+                p_advance(p)
+                default_block = parse_block(p)
+    if p_at(p, T_DEDENT)
+        p_advance(p)
+    let mut sa = {}
+    sa[0] = subj
+    let mut n = Node{kind: "match_stmt", sval: "", ival: 0, bval: false, a: sa, b: default_block, c: {}, list: cases, extra: ""}
+    return n
+
+fn parse_assert_stmt(p Parser) Node
+    p_expect(p, T_ASSERT, "'assert'")
+    let cond = parse_expr(p)
+    let mut msg = n_kind("nil")
+    if p_at(p, T_COMMA)
+        p_advance(p)
+        msg = parse_expr(p)
+    let mut ca = {}
+    ca[0] = cond
+    let mut ma = {}
+    ma[0] = msg
+    let mut n = Node{kind: "assert_stmt", sval: "", ival: 0, bval: false, a: ca, b: ma, c: {}, list: {}, extra: ""}
+    return n
+
+// ---------------------------------------------------------------------------
+// Section 7: Pratt expression parser
+// ---------------------------------------------------------------------------
+
+fn parse_expr(p Parser) Node
+    return parse_or(p)
+
+fn parse_or(p Parser) Node
+    let mut left = parse_and(p)
+    while p_at(p, T_OR)
+        p_advance(p)
+        let right = parse_and(p)
+        left = n_binary("or", left, right)
+    return left
+
+fn parse_and(p Parser) Node
+    let mut left = parse_bitor(p)
+    while p_at(p, T_AND)
+        p_advance(p)
+        let right = parse_bitor(p)
+        left = n_binary("and", left, right)
+    return left
+
+// parse_bitor: bitwise OR (|) — lower precedence than logical and, higher than xor
+fn parse_bitor(p Parser) Node
+    let mut left = parse_bitxor(p)
+    let mut done = false
+    while not done
+        if p_at(p, T_PIPE)
+            p_advance(p)
+            left = n_binary("|", left, parse_bitxor(p))
+        if not p_at(p, T_PIPE)
+            done = true
+    return left
+
+// parse_bitxor: bitwise XOR (^)
+fn parse_bitxor(p Parser) Node
+    let mut left = parse_bitand(p)
+    let mut done = false
+    while not done
+        if p_at(p, T_CARET)
+            p_advance(p)
+            left = n_binary("^", left, parse_bitand(p))
+        if not p_at(p, T_CARET)
+            done = true
+    return left
+
+// parse_bitand: bitwise AND (&)
+fn parse_bitand(p Parser) Node
+    let mut left = parse_eq(p)
+    let mut done = false
+    while not done
+        if p_at(p, T_AMP)
+            p_advance(p)
+            left = n_binary("&", left, parse_eq(p))
+        if not p_at(p, T_AMP)
+            done = true
+    return left
+
+fn parse_eq(p Parser) Node
+    let mut left = parse_cmp(p)
+    let mut done = false
+    while not done
+        let k = p_peek_kind(p)
+        if k == T_EQ
+            p_advance(p)
+            let right = parse_cmp(p)
+            left = n_binary("==", left, right)
+        if k == T_NEQ
+            p_advance(p)
+            let right = parse_cmp(p)
+            left = n_binary("!=", left, right)
+        if k != T_EQ and k != T_NEQ
+            done = true
+    return left
+
+fn parse_cmp(p Parser) Node
+    let mut left = parse_shift(p)
+    let mut done = false
+    while not done
+        let k = p_peek_kind(p)
+        if k == T_LT
+            p_advance(p)
+            left = n_binary("<", left, parse_shift(p))
+        if k == T_LE
+            p_advance(p)
+            left = n_binary("<=", left, parse_shift(p))
+        if k == T_GT
+            p_advance(p)
+            left = n_binary(">", left, parse_shift(p))
+        if k == T_GE
+            p_advance(p)
+            left = n_binary(">=", left, parse_shift(p))
+        if k != T_LT and k != T_LE and k != T_GT and k != T_GE
+            done = true
+    return left
+
+// parse_shift: left shift (<<) and right shift (>>)
+fn parse_shift(p Parser) Node
+    let mut left = parse_add(p)
+    let mut done = false
+    while not done
+        let k = p_peek_kind(p)
+        if k == T_LSHIFT
+            p_advance(p)
+            left = n_binary("<<", left, parse_add(p))
+        if k == T_RSHIFT
+            p_advance(p)
+            left = n_binary(">>", left, parse_add(p))
+        if k != T_LSHIFT and k != T_RSHIFT
+            done = true
+    return left
+
+fn parse_add(p Parser) Node
+    let mut left = parse_mul(p)
+    let mut done = false
+    while not done
+        let k = p_peek_kind(p)
+        if k == T_PLUS
+            p_advance(p)
+            left = n_binary("+", left, parse_mul(p))
+        if k == T_MINUS
+            p_advance(p)
+            left = n_binary("-", left, parse_mul(p))
+        if k != T_PLUS and k != T_MINUS
+            done = true
+    return left
+
+fn parse_mul(p Parser) Node
+    let mut left = parse_unary(p)
+    let mut done = false
+    while not done
+        let k = p_peek_kind(p)
+        if k == T_STAR
+            p_advance(p)
+            left = n_binary("*", left, parse_unary(p))
+        if k == T_SLASH
+            p_advance(p)
+            left = n_binary("/", left, parse_unary(p))
+        if k == T_PERCENT
+            p_advance(p)
+            left = n_binary("%", left, parse_unary(p))
+        if k != T_STAR and k != T_SLASH and k != T_PERCENT
+            done = true
+    return left
+
+fn parse_unary(p Parser) Node
+    let k = p_peek_kind(p)
+    if k == T_MINUS
+        p_advance(p)
+        return n_unary("-", parse_unary(p))
+    if k == T_NOT
+        p_advance(p)
+        return n_unary("not", parse_unary(p))
+    if k == T_TILDE
+        p_advance(p)
+        return n_unary("~", parse_unary(p))
+    return parse_postfix(p)
+
+fn parse_postfix(p Parser) Node
+    let mut e = parse_primary(p)
+    let mut done = false
+    while not done
+        let k = p_peek_kind(p)
+        if k == T_PERIOD
+            p_advance(p)
+            let field = p_expect(p, T_IDENT, "field name")
+            e = n_member(e, field.value)
+        if k == T_LBRACK
+            p_advance(p)
+            // Check if this is a generic type argument list: ident, ident, ... ] (
+            let mut is_generic = false
+            if e.kind == "ident"
+                let save_pos = p.pos
+                let mut looks_generic = true
+                let mut first = true
+                while p_at(p, T_IDENT) or (not first and p_at(p, T_COMMA))
+                    if not first
+                        if not p_at(p, T_COMMA)
+                            looks_generic = false
+                        p_advance(p)
+                    if not p_at(p, T_IDENT)
+                        looks_generic = false
+                    if looks_generic
+                        p_advance(p)
+                    first = false
+                if p_at(p, T_RBRACK) and looks_generic
+                    p_advance(p)
+                    if p_at(p, T_LPAREN)
+                        is_generic = true
+                p.pos = save_pos
+            if is_generic
+                let mut done2 = false
+                while not done2
+                    if p_at(p, T_RBRACK)
+                        done2 = true
+                    if not done2
+                        p_advance(p)
+                p_advance(p)
+            if not is_generic
+                let index = parse_expr(p)
+                p_expect(p, T_RBRACK, "']'")
+                e = n_index(e, index)
+        if k == T_LPAREN
+            p_advance(p)
+            let args = parse_args(p)
+            p_expect(p, T_RPAREN, "')'")
+            e = n_call(e, args)
+        if k == T_QUESTION
+            p_advance(p)
+            let mut ea = {}
+            ea[0] = e
+            let mut n = Node{kind: "error_prop", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
+            e = n
+        if k == T_LBRACE
+            if e.kind == "ident"
+                e = parse_struct_lit(p, e.sval)
+            if e.kind != "ident"
+                done = true
+        if k != T_PERIOD and k != T_LBRACK and k != T_LPAREN and k != T_QUESTION and k != T_LBRACE
+            done = true
+    return e
+
+fn parse_struct_lit(p Parser, type_name str) Node
+    p_expect(p, T_LBRACE, "'{'")
+    let mut fields = {}
+    let mut idx = 0
+    let mut done = false
+    while not done
+        if p_at(p, T_RBRACE) or p_at(p, T_EOF)
+            done = true
+        if not done
+            if idx > 0
+                p_expect(p, T_COMMA, "','")
+            if p_at(p, T_RBRACE)
+                done = true
+            if not done
+                let name_tok = p_expect(p, T_IDENT, "field name")
+                p_expect(p, T_COLON, "':'")
+                let val = parse_expr(p)
+                let mut va = {}
+                va[0] = val
+                let mut f = Node{kind: "field_init", sval: name_tok.value, ival: 0, bval: false, a: va, b: {}, c: {}, list: {}, extra: ""}
+                fields[idx] = f
+                idx = idx + 1
+    p_expect(p, T_RBRACE, "'}'")
+    let mut n = Node{kind: "struct_lit", sval: type_name, ival: 0, bval: false, a: {}, b: {}, c: {}, list: fields, extra: ""}
+    return n
+
+fn parse_args(p Parser) table
+    let mut args = {}
+    let mut idx = 0
+    let mut done = false
+    while not done
+        if p_at(p, T_RPAREN) or p_at(p, T_EOF)
+            done = true
+        if not done
+            if idx > 0
+                p_expect(p, T_COMMA, "','")
+            if p_at(p, T_DOTDOTDOT)
+                p_advance(p)
+            args[idx] = parse_expr(p)
+            idx = idx + 1
+    return args
+
+fn parse_primary(p Parser) Node
+    let tok = p_peek(p)
+    let k = tok.kind
+    if k == T_INT_LIT
+        p_advance(p)
+        return n_str("int_lit", tok.value)
+    if k == T_FLOAT_LIT
+        p_advance(p)
+        return n_str("float_lit", tok.value)
+    if k == T_STRING_LIT
+        p_advance(p)
+        return n_str("string_lit", tok.value)
+    if k == T_INTERP_STR
+        p_advance(p)
+        return n_str("interp_str", tok.value)
+    if k == T_TRUE
+        p_advance(p)
+        return n_kind("bool_true")
+    if k == T_FALSE
+        p_advance(p)
+        return n_kind("bool_false")
+    if k == T_NIL
+        p_advance(p)
+        return n_kind("nil_lit")
+    if k == T_IDENT
+        p_advance(p)
+        return n_str("ident", tok.value)
+    if k == T_LPAREN
+        p_advance(p)
+        let e = parse_expr(p)
+        if p_at(p, T_COMMA)
+            let mut elems = {}
+            elems[0] = e
+            let mut idx = 1
+            let mut done = false
+            while not done
+                if not p_at(p, T_COMMA)
+                    done = true
+                if not done
+                    p_advance(p)
+                    if p_at(p, T_RPAREN)
+                        done = true
+                    if not done
+                        elems[idx] = parse_expr(p)
+                        idx = idx + 1
+            p_expect(p, T_RPAREN, "')'")
+            let mut n = Node{kind: "tuple_lit", sval: "", ival: 0, bval: false, a: {}, b: {}, c: {}, list: elems, extra: ""}
+            return n
+        p_expect(p, T_RPAREN, "')'")
+        return e
+    if k == T_LBRACE
+        return parse_table_lit(p)
+    if k == T_FN
+        return parse_fn_expr(p)
+    if k == T_IF
+        return parse_if_expr(p)
+    if k == T_MATCH
+        return parse_match_stmt(p)
+    if k == T_SPAWN
+        p_advance(p)
+        let expr = parse_expr(p)
+        let mut ea = {}
+        ea[0] = expr
+        let mut n = Node{kind: "spawn", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
+        return n
+    if k == T_AWAIT
+        p_advance(p)
+        let expr = parse_expr(p)
+        let mut ea = {}
+        ea[0] = expr
+        let mut n = Node{kind: "await", sval: "", ival: 0, bval: false, a: ea, b: {}, c: {}, list: {}, extra: ""}
+        return n
+    p_error(p, "unexpected token: '" + tok.value + "'")
+    p_advance(p)
+    return n_kind("error")
+
+fn parse_if_expr(p Parser) Node
+    if p_at(p, T_IF)
+        p_advance(p)
+    let cond = parse_expr(p)
+    let then_block = parse_block(p)
+    let mut else_block = {}
+    if p_at(p, T_BUT)
+        p_advance(p)
+        let nested = parse_if_expr(p)
+        let mut ne = {}
+        ne[0] = nested
+        else_block = ne
+    if p_at(p, T_ELSE)
+        p_advance(p)
+        else_block = parse_block(p)
+    let mut ca = {}
+    ca[0] = cond
+    let mut n = Node{kind: "if_expr", sval: "", ival: 0, bval: false, a: ca, b: {}, c: {}, list: then_block, extra: ""}
+    n.b = else_block
+    return n
+
+fn parse_table_lit(p Parser) Node
+    p_expect(p, T_LBRACE, "'{'")
+    let mut entries = {}
+    let mut idx = 0
+    let mut done = false
+    while not done
+        if p_at(p, T_RBRACE) or p_at(p, T_EOF)
+            done = true
+        if not done
+            if idx > 0
+                p_expect(p, T_COMMA, "','")
+            let key = parse_expr(p)
+            let mut val = n_kind("nil")
+            if p_at(p, T_COLON)
+                p_advance(p)
+                val = parse_expr(p)
+            let mut ka = {}
+            ka[0] = key
+            let mut va = {}
+            va[0] = val
+            let mut entry = Node{kind: "entry", sval: "", ival: 0, bval: false, a: ka, b: va, c: {}, list: {}, extra: ""}
+            entries[idx] = entry
+            idx = idx + 1
+    p_expect(p, T_RBRACE, "'}'")
+    let mut n = Node{kind: "table_lit", sval: "", ival: 0, bval: false, a: {}, b: {}, c: {}, list: entries, extra: ""}
+    return n
+
+fn parse_fn_expr(p Parser) Node
+    p_expect(p, T_FN, "'fn'")
+    let mut name = ""
+    if p_at(p, T_IDENT)
+        let nt = p_advance(p)
+        name = nt.value
+    p_expect(p, T_LPAREN, "'('")
+    let params = parse_params(p)
+    p_expect(p, T_RPAREN, "')'")
+    let mut ret_type = ""
+    if p_at(p, T_IDENT)
+        let rt = p_advance(p)
+        ret_type = rt.value
+    let body = parse_block(p)
+    let mut n = Node{kind: "fn_expr", sval: name, ival: 0, bval: false, a: params, b: {}, c: {}, list: body, extra: ret_type}
+    return n
+
+// ---------------------------------------------------------------------------
+// Section 8: Main parser entry point
+// ---------------------------------------------------------------------------
+
+fn parse_program(tokens table) ParseResult
+    let mut p = parser_new(tokens)
+    let mut decls = {}
+    let mut idx = 0
+    let mut done = false
+    while not done
+        p_skip_all_indent(p)
+        if p_at(p, T_EOF)
+            done = true
+        if not done
+            let d = parse_decl(p)
+            if d.kind != "eof" and d.kind != "error"
+                decls[idx] = d
+                idx = idx + 1
+    let mut result = ParseResult{decls: decls, errors: p.errors, nerrors: p.nerrors}
+    return result
+
+// ---------------------------------------------------------------------------
+// Section 9: AST pretty-printing
+// ---------------------------------------------------------------------------
+
+fn print_indent(level int)
+    let mut i = 0
+    while i < level
+        print("  ")
+        i = i + 1
+
+fn print_node(n Node, level int)
+    print_indent(level)
+    let kind = n.kind
+    if kind == "fn_decl"
+        if n.bval
+            print("pub ")
+        print("fn ")
+        print(n.sval)
+        print(" -> ")
+        print(n.extra)
+        print("")
+        let params = n.a
+        let mut i = 0
+        while i < params.len()
+            let param = params[i]
+            print_indent(level + 1)
+            print("param ")
+            print(param.sval)
+            print(" ")
+            print(param.extra)
+            print("")
+            i = i + 1
+        print_block(n.list, level + 1)
+        return
+    if kind == "let_stmt"
+        print("let ")
+        if n.bval
+            print("mut ")
+        print(n.sval)
+        if n.extra != ""
+            print(" ")
+            print(n.extra)
+        print(" = ")
+        let va = n.a
+        print_expr(va[0])
+        print("")
+        return
+    if kind == "return"
+        if n.a.has(0)
+            print("return ")
+            let va = n.a
+            print_expr(va[0])
+        print("")
+        return
+    if kind == "expr_stmt"
+        let ea = n.a
+        print_expr(ea[0])
+        print("")
+        return
+    if kind == "if_stmt"
+        let branches = n.list
+        let mut i = 0
+        while i < branches.len()
+            let b = branches[i]
+            print_indent(level)
+            if i == 0
+                print("if ")
+            else
+                print("but ")
+            let ca = b.a
+            print_expr(ca[0])
+            print("")
+            print_block(b.b, level + 1)
+            i = i + 1
+        if n.a.has(0)
+            print_indent(level)
+            print("else")
+            print("")
+            print_block(n.a, level + 1)
+        return
+    if kind == "while_stmt"
+        print("while ")
+        let ca = n.a
+        print_expr(ca[0])
+        print("")
+        print_block(n.list, level + 1)
+        return
+    if kind == "assign"
+        let ea = n.a
+        print_expr(ea[0])
+        print(" = ")
+        let vb = n.b
+        print_expr(vb[0])
+        print("")
+        return
+    print(kind)
+    print("")
+
+fn print_block(block table, level int)
+    let mut i = 0
+    while i < block.len()
+        let s = block[i]
+        print_node(s, level)
+        i = i + 1
+
+fn print_expr(e Node)
+    let kind = e.kind
+    if kind == "int_lit"
+        print(e.sval)
+        return
+    if kind == "string_lit"
+        print("\"")
+        print(e.sval)
+        print("\"")
+        return
+    if kind == "ident"
+        print(e.sval)
+        return
+    if kind == "bool_true"
+        print("true")
+        return
+    if kind == "bool_false"
+        print("false")
+        return
+    if kind == "nil_lit"
+        print("nil")
+        return
+    if kind == "binary"
+        print("(")
+        let la = e.a
+        print_expr(la[0])
+        print(" ")
+        print(e.sval)
+        print(" ")
+        let rb = e.b
+        print_expr(rb[0])
+        print(")")
+        return
+    if kind == "unary"
+        print("(")
+        print(e.sval)
+        print(" ")
+        let oa = e.a
+        print_expr(oa[0])
+        print(")")
+        return
+    if kind == "call"
+        let fa = e.a
+        print_expr(fa[0])
+        print("(")
+        let args = e.list
+        let mut i = 0
+        while i < args.len()
+            if i > 0
+                print(", ")
+            print_expr(args[i])
+            i = i + 1
+        print(")")
+        return
+    if kind == "member"
+        let oa = e.a
+        print_expr(oa[0])
+        print(".")
+        print(e.sval)
+        return
+    if kind == "index"
+        let oa = e.a
+        print_expr(oa[0])
+        print("[")
+        let ib = e.b
+        print_expr(ib[0])
+        print("]")
+        return
+    print("?")
+    print(kind)
+
+// ---------------------------------------------------------------------------
+// Section 10: Main entry point
+// ---------------------------------------------------------------------------
+
+fn main() int
+    print("=== Yilt Self-Host Stage 2: Parser ===")
+    print("")
+    
+    let src = "fn add(a int, b int) int\n    return a + b\n\nfn main() int\n    let x = add(1, 2)\n    print(x)\n    return 0\n"
+    
+    print("Source:")
+    print(src)
+    print("---")
+    print("Parsing...")
+    print("")
+    
+    let tokens = lex_all(src)
+    print("Lexed ")
+    print(tokens.len())
+    print(" tokens")
+    print("")
+    
+    let result = parse_program(tokens)
+    let nerrors = result.nerrors
+    print("Parse errors: ")
+    print(nerrors)
+    print("")
+    
+    if nerrors > 0
+        print("Errors:")
+        let errors = result.errors
+        let mut i = 0
+        while i < errors.len()
+            print("  ")
+            print(errors[i])
+            i = i + 1
+        print("")
+    
+    print("AST:")
+    let decls = result.decls
+    let mut i = 0
+    while i < decls.len()
+        let d = decls[i]
+        print_node(d, 0)
+        i = i + 1
+    
+    print("")
+    print("=== Stage 2 complete ===")
+    return 0

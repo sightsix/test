@@ -1,0 +1,9 @@
+fn main() int
+    let mut sum = 0
+    let mut i = 1
+    while i <= 10
+        sum = sum + i
+        i = i + 1
+    if sum > 50
+        return sum * 2
+    return sum
