@@ -1105,3 +1105,30 @@ Stage Summary:
   - Exported _start function and memory
 - FOUR targets now supported: x86_64, AArch64, RV64, WASM
 - The Yilt self-host compiler is now a true multi-target compiler!
+
+---
+Task ID: 53-tostr-mmap-r8-fix
+Agent: main (Super Z)
+Task: Fix to_str digit extraction with mmap and R8 clobber fix.
+
+Work Log:
+- Root cause of to_str failure: R8 register clobbered by mmap syscall
+  - mmap uses R8 for the fd argument (-1)
+  - cg_int_to_str set R8 = buf+8 BEFORE the mmap call
+  - After mmap, R8 = -1 (not buf+8), so digits were written to address -1
+  - Fix: set R8 = buf+8 AFTER the mmap call
+- Second issue: data section buffer was not writable at runtime
+  - Fix: use mmap for writable buffer instead of data section
+- Digit extraction now works: to_str(42) produces length=2
+- Digits are in reverse order (24 instead of 42) — need reversal
+- to_str(0) fully works: print(to_str(0)) → "0"
+- print(to_str(x)) for non-zero: length is correct but print shows nothing
+  (likely the reverse-order digits or a print dispatch issue)
+
+- x86_64 fixpoint: gen3 == gen4 ✅
+- Pushed to GitHub (commit 636bf3d)
+
+Current to_str status:
+  to_str(0) → "0" ✅
+  to_str(42) → length=2 ✅, but print shows empty (digits in reverse order)
+  to_str(7) → length=1 ✅, but print shows empty
