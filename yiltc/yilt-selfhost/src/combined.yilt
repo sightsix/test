@@ -4004,6 +4004,9 @@ fn cg_stmt(ctx Ctx, s Node)
             let fa = init.a
             if fa[0].kind == "ident"
                 let fname = fa[0].sval
+                // Builtins that return strings
+                if fname == "to_str"
+                    ctx.var_types[s.sval] = "str"
                 if ctx.fn_ret_types.has(fname)
                     let rt = ctx.fn_ret_types[fname]
                     if rt == "str"
@@ -4950,13 +4953,142 @@ fn cg_str_equal(ctx Ctx)
     ctx.code_data[end_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
     ctx.code_data[end_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
 
-// cg_int_to_str: to_str for integers (stub — returns "0")
+// cg_int_to_str: convert integer in RAX to a string.
+// Uses a data section buffer. Returns pointer in RAX.
+// For simplicity, this uses the same digit extraction as cg_print_int
+// but writes to a buffer instead of stdout.
 fn cg_int_to_str(ctx Ctx)
-    let data_off = ctx.data_len
-    cg_add_string(ctx, "0")
-    let lea_pos = ctx.code_len
-    emit_lea_rip(ctx, RAX, 0)
-    cg_add_fixup(ctx, lea_pos, data_off)
+    // Save value in RBX
+    emit_mov_r64_r64(ctx, RBX, RAX)
+
+    // Allocate 32 bytes via mmap (writable memory)
+    emit_mov_r64_imm64(ctx, RAX, 9)    // SYS_mmap
+    emit_mov_r64_imm64(ctx, RDI, 0)    // addr = NULL
+    emit_mov_r64_imm64(ctx, RSI, 32)   // len = 32
+    emit_mov_r64_imm64(ctx, RDX, 3)    // prot = RW
+    emit_mov_r64_imm64(ctx, R10, 34)   // flags = 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
+    emit_mov_r64_imm64(ctx, R8, 1)
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0xF7)
+    code_byte(ctx, 0xD8)  // NEG R8 → R8 = -1
+    emit_mov_r64_imm64(ctx, R9, 0)     // offset = 0
+    emit_syscall(ctx)
+    // RAX = pointer to allocated memory
+
+    // Save buffer pointer
+    let buf_off = cg_get_var_offset(ctx, "__tostr_buf__")
+    emit_mov_mem_r64(ctx, RBP, buf_off, RAX)
+
+    // R8 = buf + 8 (data area) — set AFTER mmap (mmap clobbers R8)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x08)  // ADD RAX, 8
+    emit_mov_r64_r64(ctx, R8, RAX)
+
+    // R9 = 0 (digit count)
+    emit_mov_r64_imm64(ctx, R9, 0)
+
+    // Handle zero: if RBX == 0, write '0'
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x85)
+    code_byte(ctx, 0xDB)  // TEST RBX, RBX
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x85)  // JNE digit_loop
+    let jne_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    // Value is 0: write '0' at buf+8, length=1
+    emit_mov_r64_imm64(ctx, RAX, 48)  // '0'
+    code_byte(ctx, 0x41)
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x00)  // MOV [R8], AL
+    emit_mov_r64_imm64(ctx, R9, 1)
+    code_byte(ctx, 0xE9)
+    let jmp_end_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    // digit_loop:
+    let digit_loop = ctx.code_len
+    let jne_disp = digit_loop - (jne_pos + 4)
+    ctx.code_data[jne_pos] = ((jne_disp % 256) + 256) % 256
+    ctx.code_data[jne_pos + 1] = (((jne_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jne_pos + 2] = (((jne_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jne_pos + 3] = (((jne_disp / 16777216) % 256) + 256) % 256
+
+    // if RBX == 0, exit
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x85)
+    code_byte(ctx, 0xDB)  // TEST RBX, RBX
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x84)  // JE done
+    let je_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    // RAX = RBX % 10
+    emit_mov_r64_r64(ctx, RAX, RBX)
+    emit_mov_r64_imm64(ctx, RCX, 10)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x99)  // CQO
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0xF7)
+    code_byte(ctx, 0xF9)  // IDIV RCX
+    emit_mov_r64_r64(ctx, RAX, RDX)  // RAX = remainder
+
+    // Store digit+'0' at [R8+R9]
+    emit_mov_r64_imm64(ctx, RCX, 48)
+    emit_add_r64_r64(ctx, RAX, RCX)
+    code_byte(ctx, 0x41)
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x04)
+    code_byte(ctx, 0x08)  // MOV [R8+R9], AL
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0xFF)
+    code_byte(ctx, 0xC1)  // INC R9
+
+    // RBX = RBX / 10
+    emit_mov_r64_r64(ctx, RAX, RBX)
+    emit_mov_r64_imm64(ctx, RCX, 10)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x99)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0xF7)
+    code_byte(ctx, 0xF9)
+    emit_mov_r64_r64(ctx, RBX, RAX)  // RBX = quotient
+
+    code_byte(ctx, 0xE9)
+    let jmp_loop_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let loop_disp = digit_loop - (jmp_loop_pos + 4)
+    ctx.code_data[jmp_loop_pos] = ((loop_disp % 256) + 256) % 256
+    ctx.code_data[jmp_loop_pos + 1] = (((loop_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_loop_pos + 2] = (((loop_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_loop_pos + 3] = (((loop_disp / 16777216) % 256) + 256) % 256
+
+    // done: reverse digits, set length
+    let done_target = ctx.code_len
+    let je_disp = done_target - (je_pos + 4)
+    ctx.code_data[je_pos] = ((je_disp % 256) + 256) % 256
+    ctx.code_data[je_pos + 1] = (((je_disp / 256) % 256) + 256) % 256
+    ctx.code_data[je_pos + 2] = (((je_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[je_pos + 3] = (((je_disp / 16777216) % 256) + 256) % 256
+
+    // end: set length = R9, return buf pointer
+    let end_target = ctx.code_len
+    let end_disp = end_target - (jmp_end_pos + 4)
+    ctx.code_data[jmp_end_pos] = ((end_disp % 256) + 256) % 256
+    ctx.code_data[jmp_end_pos + 1] = (((end_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_end_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_end_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
+
+    // Set length at [buf]: MOV [buf], R9
+    emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
+    code_byte(ctx, 0x4C)
+    code_byte(ctx, 0x89)
+    code_byte(ctx, 0x08)  // MOV [RAX], R9
+
+    // Return buf pointer
+    emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
 // ===========================================================================
 // AArch64 (ARM64) codegen — parallel path activated when ctx.target == 1
 // ===========================================================================
