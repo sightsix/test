@@ -1163,3 +1163,28 @@ VERIFIED RESULTS:
 This was a classic x86_64 encoding bug: REX prefix bits must be set
 correctly for extended registers (R8-R15) used as index and base in
 SIB-addressed memory operands.
+
+---
+Task ID: 55-tostr-FULLY-WORKING
+Agent: main (Super Z)
+Task: to_str fully working with negative numbers, zero, and multi-digit.
+
+Work Log:
+- to_str is now FULLY WORKING for all integer values:
+  to_str(0)     → "0"     ✅
+  to_str(7)     → "7"     ✅
+  to_str(42)    → "42"    ✅
+  to_str(12345) → "12345" ✅
+  to_str(-5)    → "-5"    ✅
+  to_str(-42)   → "-42"   ✅
+
+Bugs fixed in this session:
+1. REX prefix: 0x43 (X=1,B=1) for [R8+R9] (was 0x41, missing X bit)
+2. SIB bytes: [R8+R10] needs SIB 0x10 (was 0x08)
+3. R8 clobbered by mmap: set R8 after mmap call
+4. Negative flag R10 overwritten by reversal loop: detect '-' at [buf+8]
+5. Reversal count included '-' sign: reverse only digit count, add '-' later
+6. Negative path: write '-' at buf+8, advance R8 to buf+9, negate value
+
+- x86_64 fixpoint: gen3 == gen4 ✅
+- Pushed to GitHub (commit 398d001)
