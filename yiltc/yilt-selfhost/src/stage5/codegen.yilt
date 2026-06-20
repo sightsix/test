@@ -1167,6 +1167,14 @@ fn cg_call(ctx Ctx, e Node)
                 cg_expr(ctx, arg)
                 cg_print_int(ctx)
                 return
+            // For call expressions, check if it's to_str (returns string)
+            if arg.kind == "call"
+                let cfa = arg.a
+                if cfa[0].kind == "ident"
+                    if cfa[0].sval == "to_str"
+                        cg_expr(ctx, arg)
+                        cg_print_string_val(ctx)
+                        return
             // For any other expression type, evaluate and print as integer
             cg_expr(ctx, arg)
             cg_print_int(ctx)
@@ -2629,7 +2637,8 @@ fn cg_int_to_str(ctx Ctx)
     // Store digit+'0' at [R8+R9]
     emit_mov_r64_imm64(ctx, RCX, 48)
     emit_add_r64_r64(ctx, RAX, RCX)
-    code_byte(ctx, 0x41)
+    // REX 0x43: W=0 (8-bit), R=0, X=1 (R9 index), B=1 (R8 base)
+    code_byte(ctx, 0x43)
     code_byte(ctx, 0x88)
     code_byte(ctx, 0x04)
     code_byte(ctx, 0x08)  // MOV [R8+R9], AL
@@ -2656,13 +2665,75 @@ fn cg_int_to_str(ctx Ctx)
     ctx.code_data[jmp_loop_pos + 2] = (((loop_disp / 65536) % 256) + 256) % 256
     ctx.code_data[jmp_loop_pos + 3] = (((loop_disp / 16777216) % 256) + 256) % 256
 
-    // done: reverse digits, set length
+    // done: reverse digits in-place, then set length
     let done_target = ctx.code_len
     let je_disp = done_target - (je_pos + 4)
     ctx.code_data[je_pos] = ((je_disp % 256) + 256) % 256
     ctx.code_data[je_pos + 1] = (((je_disp / 256) % 256) + 256) % 256
     ctx.code_data[je_pos + 2] = (((je_disp / 65536) % 256) + 256) % 256
     ctx.code_data[je_pos + 3] = (((je_disp / 16777216) % 256) + 256) % 256
+
+    // Reverse digits: R10 = 0 (left), R11 = R9-1 (right)
+    emit_mov_r64_imm64(ctx, R10, 0)
+    emit_mov_r64_r64(ctx, R11, R9)
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xEB)
+    code_byte(ctx, 0x01)  // SUB R11, 1
+
+    // rev_loop: if R10 >= R11, done reversing
+    let rev_loop = ctx.code_len
+    code_byte(ctx, 0x4D)
+    code_byte(ctx, 0x39)
+    code_byte(ctx, 0xDA)  // CMP R10, R11
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x8D)  // JGE rev_done
+    let jge_rev_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    // Swap [R8+R10] and [R8+R11]
+    // REX 0x43: X=1 (extends index), B=1 (extends base)
+    // SIB for [R8+R10]: index=010(R10-8), base=000(R8-8) → 0x10
+    // SIB for [R8+R11]: index=011(R11-8), base=000(R8-8) → 0x18
+    code_byte(ctx, 0x43)
+    code_byte(ctx, 0x8A)
+    code_byte(ctx, 0x04)
+    code_byte(ctx, 0x10)  // MOV AL, [R8+R10]
+    code_byte(ctx, 0x43)
+    code_byte(ctx, 0x8A)
+    code_byte(ctx, 0x0C)
+    code_byte(ctx, 0x18)  // MOV CL, [R8+R11]
+    code_byte(ctx, 0x43)
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x0C)
+    code_byte(ctx, 0x10)  // MOV [R8+R10], CL
+    code_byte(ctx, 0x43)
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x04)
+    code_byte(ctx, 0x18)  // MOV [R8+R11], AL
+
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0xFF)
+    code_byte(ctx, 0xC2)  // INC R10
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0xFF)
+    code_byte(ctx, 0xCB)  // DEC R11
+    code_byte(ctx, 0xE9)
+    let jmp_rev_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let rev_disp = rev_loop - (jmp_rev_pos + 4)
+    ctx.code_data[jmp_rev_pos] = ((rev_disp % 256) + 256) % 256
+    ctx.code_data[jmp_rev_pos + 1] = (((rev_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_rev_pos + 2] = (((rev_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_rev_pos + 3] = (((rev_disp / 16777216) % 256) + 256) % 256
+
+    // rev_done:
+    let rev_done_target = ctx.code_len
+    let jge_disp = rev_done_target - (jge_rev_pos + 4)
+    ctx.code_data[jge_rev_pos] = ((jge_disp % 256) + 256) % 256
+    ctx.code_data[jge_rev_pos + 1] = (((jge_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jge_rev_pos + 2] = (((jge_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jge_rev_pos + 3] = (((jge_disp / 16777216) % 256) + 256) % 256
 
     // end: set length = R9, return buf pointer
     let end_target = ctx.code_len
