@@ -5002,7 +5002,7 @@ fn cg_int_to_str(ctx Ctx)
     code_byte(ctx, 0x85)
     code_byte(ctx, 0xDB)  // TEST RBX, RBX
     code_byte(ctx, 0x0F)
-    code_byte(ctx, 0x85)  // JNE digit_loop
+    code_byte(ctx, 0x85)  // JNE check_neg
     let jne_pos = ctx.code_len
     code_u32(ctx, 0)
 
@@ -5016,13 +5016,75 @@ fn cg_int_to_str(ctx Ctx)
     let jmp_end_pos = ctx.code_len
     code_u32(ctx, 0)
 
-    // digit_loop:
-    let digit_loop = ctx.code_len
-    let jne_disp = digit_loop - (jne_pos + 4)
+    // check_neg: if RBX < 0, handle negative
+    let check_neg_target = ctx.code_len
+    let jne_disp = check_neg_target - (jne_pos + 4)
     ctx.code_data[jne_pos] = ((jne_disp % 256) + 256) % 256
     ctx.code_data[jne_pos + 1] = (((jne_disp / 256) % 256) + 256) % 256
     ctx.code_data[jne_pos + 2] = (((jne_disp / 65536) % 256) + 256) % 256
     ctx.code_data[jne_pos + 3] = (((jne_disp / 16777216) % 256) + 256) % 256
+
+    // TEST RBX, RBX; JS negative_handler
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x85)
+    code_byte(ctx, 0xDB)  // TEST RBX, RBX
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x88)  // JS neg_label
+    let js_neg_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    // Positive: fall through to digit_loop (R8 = buf+8, R9 = 0)
+    code_byte(ctx, 0xE9)
+    let jmp_digit_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    // neg_label: write '-' at buf+8, negate RBX, R8 = buf+9
+    let neg_label = ctx.code_len
+    let js_disp = neg_label - (js_neg_pos + 4)
+    ctx.code_data[js_neg_pos] = ((js_disp % 256) + 256) % 256
+    ctx.code_data[js_neg_pos + 1] = (((js_disp / 256) % 256) + 256) % 256
+    ctx.code_data[js_neg_pos + 2] = (((js_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[js_neg_pos + 3] = (((js_disp / 16777216) % 256) + 256) % 256
+
+    // Write '-' at [R8] (buf+8)
+    emit_mov_r64_imm64(ctx, RAX, 45)  // '-'
+    code_byte(ctx, 0x41)
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x00)  // MOV [R8], AL
+    // R8 = buf + 9 (skip the '-')
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x01)  // ADD R8, 1
+    // Negate RBX
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0xF7)
+    code_byte(ctx, 0xDB)  // NEG RBX
+    // R9 stays 0 (digit count, not counting '-')
+    // We'll add 1 to final length for the '-'
+    // Use R10 as a flag: 1 = negative, 0 = positive
+    emit_mov_r64_imm64(ctx, R10, 1)  // negative flag
+    code_byte(ctx, 0xE9)
+    let jmp_digit2_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    // Positive path: R10 = 0 (no negative flag)
+    let pos_label = ctx.code_len
+    let jmp_d1_disp = pos_label - (jmp_digit_pos + 4)
+    ctx.code_data[jmp_digit_pos] = ((jmp_d1_disp % 256) + 256) % 256
+    ctx.code_data[jmp_digit_pos + 1] = (((jmp_d1_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_digit_pos + 2] = (((jmp_d1_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_digit_pos + 3] = (((jmp_d1_disp / 16777216) % 256) + 256) % 256
+    emit_mov_r64_imm64(ctx, R10, 0)  // positive flag
+
+    // digit_loop: (both positive and negative jump here)
+    let digit_loop = ctx.code_len
+    // Patch negative path jump to here
+    let d2_disp = digit_loop - (jmp_digit2_pos + 4)
+    ctx.code_data[jmp_digit2_pos] = ((d2_disp % 256) + 256) % 256
+    ctx.code_data[jmp_digit2_pos + 1] = (((d2_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_digit2_pos + 2] = (((d2_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_digit2_pos + 3] = (((d2_disp / 16777216) % 256) + 256) % 256
 
     // if RBX == 0, exit
     code_byte(ctx, 0x48)
@@ -5074,7 +5136,7 @@ fn cg_int_to_str(ctx Ctx)
     ctx.code_data[jmp_loop_pos + 2] = (((loop_disp / 65536) % 256) + 256) % 256
     ctx.code_data[jmp_loop_pos + 3] = (((loop_disp / 16777216) % 256) + 256) % 256
 
-    // done: reverse digits in-place, then set length
+    // done: reverse digits FIRST, then add negative flag to count
     let done_target = ctx.code_len
     let je_disp = done_target - (je_pos + 4)
     ctx.code_data[je_pos] = ((je_disp % 256) + 256) % 256
@@ -5152,7 +5214,38 @@ fn cg_int_to_str(ctx Ctx)
     ctx.code_data[jmp_end_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
     ctx.code_data[jmp_end_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
 
-    // Set length at [buf]: MOV [buf], R9
+    // Set length at [buf]: R9 + negative flag (R10 was overwritten by reversal,
+    // so we saved it... actually we need to use a different approach)
+    // The negative flag was in R10 but reversal overwrote it.
+    // Let's check if buf+8 == '-' to determine if negative.
+    // Actually, simpler: just add the negative flag BEFORE reversal.
+    // But we moved that... Let me use a different register.
+    // The reversal is done. R9 = digit count (NOT including '-').
+    // We need to add 1 if this was a negative number.
+    // Check if [buf+8] == '-' (45): if so, add 1 to R9.
+    emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x8A)
+    code_byte(ctx, 0x40)
+    code_byte(ctx, 0x08)  // MOV AL, [RAX+8]
+    code_byte(ctx, 0x3C)
+    code_byte(ctx, 45)    // CMP AL, '-'
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x85)  // JNE skip_add
+    let jne_skip_pos = ctx.code_len
+    code_u32(ctx, 0)
+    // Negative: R9++
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0xFF)
+    code_byte(ctx, 0xC1)  // INC R9
+    let skip_add_target = ctx.code_len
+    let jne_skip_disp = skip_add_target - (jne_skip_pos + 4)
+    ctx.code_data[jne_skip_pos] = ((jne_skip_disp % 256) + 256) % 256
+    ctx.code_data[jne_skip_pos + 1] = (((jne_skip_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jne_skip_pos + 2] = (((jne_skip_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jne_skip_pos + 3] = (((jne_skip_disp / 16777216) % 256) + 256) % 256
+
+    // Set length at [buf]
     emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
     code_byte(ctx, 0x4C)
     code_byte(ctx, 0x89)
