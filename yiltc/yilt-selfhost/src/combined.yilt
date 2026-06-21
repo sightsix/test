@@ -2907,7 +2907,7 @@ fn build_elf(ctx Ctx, output_fd int) int
     if ctx.target == 1
         write_byte(output_fd, 183)
         write_byte(output_fd, 0)
-    if ctx.target == 2
+    if ctx.target == 2 or ctx.target == 4
         write_byte(output_fd, 243)
         write_byte(output_fd, 0)
     if ctx.target == 0
@@ -3035,6 +3035,10 @@ fn cg_expr(ctx Ctx, e Node)
     if ctx.target == 3
         wasm_cg_expr(ctx, e)
         return
+    // Multi-target dispatch: RV32 path
+    if ctx.target == 4
+        rv32_cg_expr(ctx, e)
+        return
     if e.kind == "int_lit"
         let val = parse_int(e.sval)
         emit_mov_r64_imm64(ctx, RAX, val)
@@ -3084,8 +3088,12 @@ fn cg_expr(ctx Ctx, e Node)
         emit_mov_r64_imm64(ctx, RAX, 0)
         return
     if e.kind == "float_lit"
-        let val = parse_int(e.sval)
-        emit_mov_r64_imm64(ctx, RAX, val)
+        let bits = parse_float_to_bits(e.sval)
+        if bits == 0
+            let val = parse_int(e.sval)
+            emit_mov_r64_imm64(ctx, RAX, val)
+        else
+            emit_mov_r64_imm64(ctx, RAX, bits)
         return
     if e.kind == "error_prop"
         let ea = e.a
@@ -3469,6 +3477,13 @@ fn cg_call(ctx Ctx, e Node)
             if arg.kind == "int_lit"
                 emit_mov_r64_imm64(ctx, RAX, parse_int(arg.sval))
                 cg_print_int(ctx)
+            if arg.kind == "float_lit"
+                let fbits = parse_float_to_bits(arg.sval)
+                if fbits == 0
+                    emit_mov_r64_imm64(ctx, RAX, parse_int(arg.sval))
+                else
+                    emit_mov_r64_imm64(ctx, RAX, fbits)
+                cg_print_float(ctx)
             if arg.kind == "ident"
                 if ctx.var_types.has(arg.sval)
                     let vt = ctx.var_types[arg.sval]
@@ -3479,6 +3494,9 @@ fn cg_call(ctx Ctx, e Node)
                     if vt == "int"
                         cg_expr(ctx, arg)
                         cg_print_int(ctx)
+                    if vt == "float"
+                        cg_expr(ctx, arg)
+                        cg_print_float(ctx)
                 if not ctx.var_types.has(arg.sval)
                     cg_expr(ctx, arg)
                     cg_print_int(ctx)
@@ -3818,6 +3836,23 @@ fn cg_member(ctx Ctx, e Node)
 fn cg_index(ctx Ctx, e Node)
     let oa = e.a
     let kb = e.b
+    let target_expr = oa[0]
+    if cg_is_string_expr(ctx, target_expr)
+        cg_expr(ctx, target_expr)
+        let str_off = cg_get_var_offset(ctx, "__index_str__")
+        emit_mov_mem_r64(ctx, RBP, str_off, RAX)
+        cg_expr(ctx, kb[0])
+        emit_mov_r64_mem(ctx, RBX, RBP, str_off)
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x8D)
+        code_byte(ctx, 0x5B)
+        code_byte(ctx, 0x08)
+        emit_add_r64_r64(ctx, RBX, RAX)
+        code_byte(ctx, 0x48)
+        code_byte(ctx, 0x0F)
+        code_byte(ctx, 0xB6)
+        code_byte(ctx, 0x03)
+        return
     cg_expr(ctx, oa[0])
     let tab_off = cg_get_var_offset(ctx, "__index_tab__")
     emit_mov_mem_r64(ctx, RBP, tab_off, RAX)
@@ -3885,6 +3920,33 @@ fn cg_index(ctx Ctx, e Node)
     ctx.code_data[end_jmp_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
 
 // Print the integer in RAX to stdout.
+fn cg_print_float(ctx Ctx)
+    emit_push_r64(ctx, RAX)
+    code_byte(ctx, 0xF3)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x7E)
+    code_byte(ctx, 0x04)
+    code_byte(ctx, 0x24)
+    emit_mov_r64_imm64(ctx, RAX, 4696837146684686336)
+    emit_push_r64(ctx, RAX)
+    code_byte(ctx, 0xF3)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x7E)
+    code_byte(ctx, 0x0C)
+    code_byte(ctx, 0x24)
+    code_byte(ctx, 0xF2)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x59)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0xF2)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x2D)
+    code_byte(ctx, 0xC0)
+    emit_pop_r64(ctx, RCX)
+    emit_pop_r64(ctx, RCX)
+    cg_print_int(ctx)
+
 // Uses the stack as a temporary buffer for digit characters.
 fn cg_print_int(ctx Ctx)
     // Print integer in RAX to stdout.
@@ -3985,6 +4047,10 @@ fn cg_stmt(ctx Ctx, s Node)
     if ctx.target == 3
         wasm_cg_stmt(ctx, s)
         return
+    // Multi-target dispatch: RV32 path
+    if ctx.target == 4
+        rv32_cg_stmt(ctx, s)
+        return
     if s.kind == "let_stmt"
         let va = s.a
         let init = va[0]
@@ -3993,6 +4059,8 @@ fn cg_stmt(ctx Ctx, s Node)
             ctx.var_types[s.sval] = "str"
         if init.kind == "int_lit"
             ctx.var_types[s.sval] = "int"
+        if init.kind == "float_lit"
+            ctx.var_types[s.sval] = "float"
         if init.kind == "bool_true"
             ctx.var_types[s.sval] = "bool"
         if init.kind == "bool_false"
@@ -4023,6 +4091,12 @@ fn cg_stmt(ctx Ctx, s Node)
                         ctx.var_types[s.sval] = "int"
                     if rt == "bool"
                         ctx.var_types[s.sval] = "bool"
+            if fa[0].kind == "member"
+                let mname = fa[0].sval
+                if mname == "upper" or mname == "lower" or mname == "trim"
+                    ctx.var_types[s.sval] = "str"
+                if mname == "bytes"
+                    ctx.var_types[s.sval] = "str"
         cg_expr(ctx, init)
         let offset = cg_get_var_offset(ctx, s.sval)
         emit_mov_mem_r64(ctx, RBP, offset, RAX)
@@ -4394,7 +4468,11 @@ fn cg_function(ctx Ctx, fn_decl Node, is_main bool)
         return
     // Multi-target dispatch: WASM path
     if ctx.target == 3
-        wasm_cg_function(ctx, fn_decl, is_main)
+        wasm_cg_function_v2(ctx, fn_decl, is_main)
+        return
+    // Multi-target dispatch: RV32 path
+    if ctx.target == 4
+        rv32_cg_function(ctx, fn_decl, is_main)
         return
     // Record function start offset
     let fn_start = ctx.code_len
@@ -4479,6 +4557,10 @@ fn compile_program(src str, output_path str) int
     if target_fd3 >= 0
         sys.close(target_fd3)
         ctx.target = 3
+    let target_fd4 = sys.open("/tmp/yilt_target_rv32", 0, 0)
+    if target_fd4 >= 0
+        sys.close(target_fd4)
+        ctx.target = 4  // RV32 full codegen
 
     // Pre-scan: record function return types for type dispatch in print.
     let mut i = 0
@@ -4514,10 +4596,10 @@ fn compile_program(src str, output_path str) int
             arm_mov_imm64(ctx, X8, 93)
             arm_svc(ctx)
         else
-            if ctx.target == 2
+            if ctx.target == 2 or ctx.target == 4
                 rv_apply_fixups(ctx)
                 rv_apply_call_fixups(ctx)
-                // Exit syscall for RV64
+                // Exit syscall for RV64/RV32
                 rv_li(ctx, RV_A0, 0)
                 rv_li(ctx, RV_A7, 93)
                 rv_ecall(ctx)
@@ -4569,8 +4651,8 @@ fn compile_program(src str, output_path str) int
         arm_apply_fixups(ctx)
         arm_apply_call_fixups(ctx)
     else
-        if ctx.target == 2
-            // RV64: apply AUIPC+ADDI and JAL fixups
+        if ctx.target == 2 or ctx.target == 4
+            // RV64/RV32: apply AUIPC+ADDI and JAL fixups
             rv_apply_fixups(ctx)
             rv_apply_call_fixups(ctx)
         else
@@ -4596,9 +4678,30 @@ fn compile_program(src str, output_path str) int
         print("Cannot open output file")
         return 1
     if ctx.target == 3
-        let written = wasm_build_module(ctx, fd)
+        let written = wasm_build_module_v2(ctx, fd)
     else
-        let written = build_elf(ctx, fd)
+        // Check output format: boot, flat, PE64, Mach-O, or default ELF64
+        let fmt_boot = sys.open("/tmp/yilt_format_boot", 0, 0)
+        if fmt_boot >= 0
+            sys.close(fmt_boot)
+            let written = build_boot(ctx, fd)
+        else
+            let fmt_flat = sys.open("/tmp/yilt_format_flat", 0, 0)
+            if fmt_flat >= 0
+                sys.close(fmt_flat)
+                let written = build_flat(ctx, fd)
+            else
+                let fmt_pe = sys.open("/tmp/yilt_format_pe", 0, 0)
+                if fmt_pe >= 0
+                    sys.close(fmt_pe)
+                    let written = build_pe64(ctx, fd)
+                else
+                    let fmt_macho = sys.open("/tmp/yilt_format_macho", 0, 0)
+                    if fmt_macho >= 0
+                        sys.close(fmt_macho)
+                        let written = build_macho64(ctx, fd)
+                    else
+                        let written = build_elf(ctx, fd)
     sys.close(fd)
 
     print("Compiled to ")
@@ -4615,6 +4718,73 @@ fn compile_program(src str, output_path str) int
 // ---------------------------------------------------------------------------
 // Section 8: Helpers
 // ---------------------------------------------------------------------------
+fn parse_float_to_bits(s str) int
+    let bytes = s.bytes()
+    let n = bytes.len()
+    if n == 0
+        return 0
+    let mut i = 0
+    let mut sign = 0
+    if bytes[0] == 45
+        sign = 1
+        i = 1
+    let mut ipart = 0
+    while i < n and bytes[i] != 46
+        if bytes[i] >= 48 and bytes[i] <= 57
+            ipart = ipart * 10 + (bytes[i] - 48)
+        i = i + 1
+    if i < n and bytes[i] == 46
+        i = i + 1
+    let mut fpart = 0
+    let mut fdigits = 0
+    while i < n
+        if bytes[i] >= 48 and bytes[i] <= 57
+            fpart = fpart * 10 + (bytes[i] - 48)
+            fdigits = fdigits + 1
+        i = i + 1
+    let mut denom = 1
+    let mut j = 0
+    while j < fdigits
+        denom = denom * 10
+        j = j + 1
+    let numer = ipart * denom + fpart
+    if numer == 0
+        return 0
+    let mut p = 0
+    if numer >= denom
+        let mut temp = denom
+        while temp + temp <= numer
+            temp = temp + temp
+            p = p + 1
+    else
+        let mut temp = numer
+        while temp + temp < denom
+            temp = temp + temp
+            p = p - 1
+    let mut shifted = numer
+    if p <= 52
+        let shift = 52 - p
+        let mut k = 0
+        while k < shift
+            shifted = shifted + shifted
+            k = k + 1
+    else
+        let shift = p - 52
+        let mut k = 0
+        while k < shift
+            shifted = shifted / 2
+            k = k + 1
+    let mask = 4503599627370495
+    let mantissa = (shifted / denom) & mask
+    let biased_exp = p + 1023
+    let exp_bits = biased_exp * 4503599627370496
+    let result = exp_bits + mantissa
+    if sign == 1
+        let mut sign_bit = 0 - 4611686018427387904
+        sign_bit = sign_bit - 4611686018427387904
+        return result + sign_bit
+    return result
+
 
 fn parse_int(s str) int
     let bytes = s.bytes()
@@ -4962,19 +5132,22 @@ fn cg_str_equal(ctx Ctx)
     ctx.code_data[end_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
 
 // cg_int_to_str: convert integer in RAX to a string.
-// Uses a data section buffer. Returns pointer in RAX.
-// For simplicity, this uses the same digit extraction as cg_print_int
-// but writes to a buffer instead of stdout.
+// Uses a stack-allocated buffer. Returns pointer in RAX.
+// String layout: [len:8 | data... | null:1]
 fn cg_int_to_str(ctx Ctx)
-    // Save value in RBX
-    emit_mov_r64_r64(ctx, RBX, RAX)
+    // Save the integer value in a local variable FIRST
+    let val_off = cg_get_var_offset(ctx, "__tostr_val__")
+    emit_mov_mem_r64(ctx, RBP, val_off, RAX)
 
-    // Allocate 32 bytes via mmap (writable memory)
+    // Allocate 32 bytes via mmap (persists after function returns)
+    // mmap(NULL, 32, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
     emit_mov_r64_imm64(ctx, RAX, 9)    // SYS_mmap
     emit_mov_r64_imm64(ctx, RDI, 0)    // addr = NULL
     emit_mov_r64_imm64(ctx, RSI, 32)   // len = 32
     emit_mov_r64_imm64(ctx, RDX, 3)    // prot = RW
-    emit_mov_r64_imm64(ctx, R10, 34)   // flags = 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
+    // MAP_PRIVATE|MAP_ANONYMOUS = 0x22
+    emit_mov_r64_imm64(ctx, R10, 34)   // flags = 0x22 (decimal)
+    // fd = -1: use MOV then NEG to avoid large immediate issues
     emit_mov_r64_imm64(ctx, R8, 1)
     code_byte(ctx, 0x49)
     code_byte(ctx, 0xF7)
@@ -4987,116 +5160,74 @@ fn cg_int_to_str(ctx Ctx)
     let buf_off = cg_get_var_offset(ctx, "__tostr_buf__")
     emit_mov_mem_r64(ctx, RBP, buf_off, RAX)
 
-    // R8 = buf + 8 (data area) — set AFTER mmap (mmap clobbers R8)
+    // Handle negative: if value < 0, write '-' and negate
+    emit_mov_r64_mem(ctx, RAX, RBP, val_off)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x85)
+    code_byte(ctx, 0xC0)  // TEST RAX, RAX
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x88)  // JS negative_label
+    let js_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    // Non-negative: R8 = buf+8, R9 = 0
+    emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
     code_byte(ctx, 0x48)
     code_byte(ctx, 0x83)
     code_byte(ctx, 0xC0)
     code_byte(ctx, 0x08)  // ADD RAX, 8
     emit_mov_r64_r64(ctx, R8, RAX)
-
-    // R9 = 0 (digit count)
     emit_mov_r64_imm64(ctx, R9, 0)
 
-    // Handle zero: if RBX == 0, write '0'
+    // if value == 0, write '0'
+    emit_mov_r64_mem(ctx, RAX, RBP, val_off)
     code_byte(ctx, 0x48)
     code_byte(ctx, 0x85)
-    code_byte(ctx, 0xDB)  // TEST RBX, RBX
+    code_byte(ctx, 0xC0)  // TEST RAX, RAX
     code_byte(ctx, 0x0F)
-    code_byte(ctx, 0x85)  // JNE check_neg
-    let jne_pos = ctx.code_len
+    code_byte(ctx, 0x85)  // JNE digit_loop
+    let jne_zero_pos = ctx.code_len
     code_u32(ctx, 0)
 
-    // Value is 0: write '0' at buf+8, length=1
-    emit_mov_r64_imm64(ctx, RAX, 48)  // '0'
-    code_byte(ctx, 0x41)
-    code_byte(ctx, 0x88)
-    code_byte(ctx, 0x00)  // MOV [R8], AL
-    emit_mov_r64_imm64(ctx, R9, 1)
-    code_byte(ctx, 0xE9)
-    let jmp_end_pos = ctx.code_len
-    code_u32(ctx, 0)
-
-    // check_neg: if RBX < 0, handle negative
-    let check_neg_target = ctx.code_len
-    let jne_disp = check_neg_target - (jne_pos + 4)
-    ctx.code_data[jne_pos] = ((jne_disp % 256) + 256) % 256
-    ctx.code_data[jne_pos + 1] = (((jne_disp / 256) % 256) + 256) % 256
-    ctx.code_data[jne_pos + 2] = (((jne_disp / 65536) % 256) + 256) % 256
-    ctx.code_data[jne_pos + 3] = (((jne_disp / 16777216) % 256) + 256) % 256
-
-    // TEST RBX, RBX; JS negative_handler
+    // Value is 0: write '0' at buf+8, set length=1
+    emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
     code_byte(ctx, 0x48)
-    code_byte(ctx, 0x85)
-    code_byte(ctx, 0xDB)  // TEST RBX, RBX
-    code_byte(ctx, 0x0F)
-    code_byte(ctx, 0x88)  // JS neg_label
-    let js_neg_pos = ctx.code_len
-    code_u32(ctx, 0)
-
-    // Positive: fall through to digit_loop (R8 = buf+8, R9 = 0)
-    code_byte(ctx, 0xE9)
-    let jmp_digit_pos = ctx.code_len
-    code_u32(ctx, 0)
-
-    // neg_label: write '-' at buf+8, negate RBX, R8 = buf+9
-    let neg_label = ctx.code_len
-    let js_disp = neg_label - (js_neg_pos + 4)
-    ctx.code_data[js_neg_pos] = ((js_disp % 256) + 256) % 256
-    ctx.code_data[js_neg_pos + 1] = (((js_disp / 256) % 256) + 256) % 256
-    ctx.code_data[js_neg_pos + 2] = (((js_disp / 65536) % 256) + 256) % 256
-    ctx.code_data[js_neg_pos + 3] = (((js_disp / 16777216) % 256) + 256) % 256
-
-    // Write '-' at [R8] (buf+8)
-    emit_mov_r64_imm64(ctx, RAX, 45)  // '-'
-    code_byte(ctx, 0x41)
-    code_byte(ctx, 0x88)
-    code_byte(ctx, 0x00)  // MOV [R8], AL
-    // R8 = buf + 9 (skip the '-')
-    code_byte(ctx, 0x49)
     code_byte(ctx, 0x83)
     code_byte(ctx, 0xC0)
-    code_byte(ctx, 0x01)  // ADD R8, 1
-    // Negate RBX
+    code_byte(ctx, 0x08)
+    emit_mov_r64_imm64(ctx, RCX, 48)
     code_byte(ctx, 0x48)
-    code_byte(ctx, 0xF7)
-    code_byte(ctx, 0xDB)  // NEG RBX
-    // R9 stays 0 (digit count, not counting '-')
-    // We'll add 1 to final length for the '-'
-    // Use R10 as a flag: 1 = negative, 0 = positive
-    emit_mov_r64_imm64(ctx, R10, 1)  // negative flag
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x08)  // MOV [RAX], CL
+    emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
+    emit_mov_r64_imm64(ctx, RCX, 1)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x89)
+    code_byte(ctx, 0x08)  // MOV [RAX], RCX (length=1)
     code_byte(ctx, 0xE9)
-    let jmp_digit2_pos = ctx.code_len
+    let jmp_end1_pos = ctx.code_len
     code_u32(ctx, 0)
 
-    // Positive path: R10 = 0 (no negative flag)
-    let pos_label = ctx.code_len
-    let jmp_d1_disp = pos_label - (jmp_digit_pos + 4)
-    ctx.code_data[jmp_digit_pos] = ((jmp_d1_disp % 256) + 256) % 256
-    ctx.code_data[jmp_digit_pos + 1] = (((jmp_d1_disp / 256) % 256) + 256) % 256
-    ctx.code_data[jmp_digit_pos + 2] = (((jmp_d1_disp / 65536) % 256) + 256) % 256
-    ctx.code_data[jmp_digit_pos + 3] = (((jmp_d1_disp / 16777216) % 256) + 256) % 256
-    emit_mov_r64_imm64(ctx, R10, 0)  // positive flag
-
-    // digit_loop: (both positive and negative jump here)
+    // digit_loop:
     let digit_loop = ctx.code_len
-    // Patch negative path jump to here
-    let d2_disp = digit_loop - (jmp_digit2_pos + 4)
-    ctx.code_data[jmp_digit2_pos] = ((d2_disp % 256) + 256) % 256
-    ctx.code_data[jmp_digit2_pos + 1] = (((d2_disp / 256) % 256) + 256) % 256
-    ctx.code_data[jmp_digit2_pos + 2] = (((d2_disp / 65536) % 256) + 256) % 256
-    ctx.code_data[jmp_digit2_pos + 3] = (((d2_disp / 16777216) % 256) + 256) % 256
+    let jne_disp = digit_loop - (jne_zero_pos + 4)
+    ctx.code_data[jne_zero_pos] = ((jne_disp % 256) + 256) % 256
+    ctx.code_data[jne_zero_pos + 1] = (((jne_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jne_zero_pos + 2] = (((jne_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jne_zero_pos + 3] = (((jne_disp / 16777216) % 256) + 256) % 256
 
-    // if RBX == 0, exit
+    // if value == 0, exit loop
+    emit_mov_r64_mem(ctx, RAX, RBP, val_off)
     code_byte(ctx, 0x48)
     code_byte(ctx, 0x85)
-    code_byte(ctx, 0xDB)  // TEST RBX, RBX
+    code_byte(ctx, 0xC0)  // TEST RAX, RAX
     code_byte(ctx, 0x0F)
-    code_byte(ctx, 0x84)  // JE done
-    let je_pos = ctx.code_len
+    code_byte(ctx, 0x84)  // JE done_digits
+    let je_done_pos = ctx.code_len
     code_u32(ctx, 0)
 
-    // RAX = RBX % 10
-    emit_mov_r64_r64(ctx, RAX, RBX)
+    // digit = value % 10
+    emit_mov_r64_mem(ctx, RAX, RBP, val_off)
     emit_mov_r64_imm64(ctx, RCX, 10)
     code_byte(ctx, 0x48)
     code_byte(ctx, 0x99)  // CQO
@@ -5108,8 +5239,7 @@ fn cg_int_to_str(ctx Ctx)
     // Store digit+'0' at [R8+R9]
     emit_mov_r64_imm64(ctx, RCX, 48)
     emit_add_r64_r64(ctx, RAX, RCX)
-    // REX 0x43: W=0 (8-bit), R=0, X=1 (R9 index), B=1 (R8 base)
-    code_byte(ctx, 0x43)
+    code_byte(ctx, 0x41)
     code_byte(ctx, 0x88)
     code_byte(ctx, 0x04)
     code_byte(ctx, 0x08)  // MOV [R8+R9], AL
@@ -5117,15 +5247,15 @@ fn cg_int_to_str(ctx Ctx)
     code_byte(ctx, 0xFF)
     code_byte(ctx, 0xC1)  // INC R9
 
-    // RBX = RBX / 10
-    emit_mov_r64_r64(ctx, RAX, RBX)
+    // value = value / 10
+    emit_mov_r64_mem(ctx, RAX, RBP, val_off)
     emit_mov_r64_imm64(ctx, RCX, 10)
     code_byte(ctx, 0x48)
     code_byte(ctx, 0x99)
     code_byte(ctx, 0x48)
     code_byte(ctx, 0xF7)
-    code_byte(ctx, 0xF9)
-    emit_mov_r64_r64(ctx, RBX, RAX)  // RBX = quotient
+    code_byte(ctx, 0xF9)  // IDIV RCX
+    emit_mov_mem_r64(ctx, RBP, val_off, RAX)
 
     code_byte(ctx, 0xE9)
     let jmp_loop_pos = ctx.code_len
@@ -5136,15 +5266,15 @@ fn cg_int_to_str(ctx Ctx)
     ctx.code_data[jmp_loop_pos + 2] = (((loop_disp / 65536) % 256) + 256) % 256
     ctx.code_data[jmp_loop_pos + 3] = (((loop_disp / 16777216) % 256) + 256) % 256
 
-    // done: reverse digits FIRST, then add negative flag to count
-    let done_target = ctx.code_len
-    let je_disp = done_target - (je_pos + 4)
-    ctx.code_data[je_pos] = ((je_disp % 256) + 256) % 256
-    ctx.code_data[je_pos + 1] = (((je_disp / 256) % 256) + 256) % 256
-    ctx.code_data[je_pos + 2] = (((je_disp / 65536) % 256) + 256) % 256
-    ctx.code_data[je_pos + 3] = (((je_disp / 16777216) % 256) + 256) % 256
+    // done_digits: reverse digits in-place
+    let done_digits_target = ctx.code_len
+    let je_disp = done_digits_target - (je_done_pos + 4)
+    ctx.code_data[je_done_pos] = ((je_disp % 256) + 256) % 256
+    ctx.code_data[je_done_pos + 1] = (((je_disp / 256) % 256) + 256) % 256
+    ctx.code_data[je_done_pos + 2] = (((je_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[je_done_pos + 3] = (((je_disp / 16777216) % 256) + 256) % 256
 
-    // Reverse digits: R10 = 0 (left), R11 = R9-1 (right)
+    // Reverse: R10=0 (left), R11=R9-1 (right)
     emit_mov_r64_imm64(ctx, R10, 0)
     emit_mov_r64_r64(ctx, R11, R9)
     code_byte(ctx, 0x49)
@@ -5152,24 +5282,20 @@ fn cg_int_to_str(ctx Ctx)
     code_byte(ctx, 0xEB)
     code_byte(ctx, 0x01)  // SUB R11, 1
 
-    // rev_loop: if R10 >= R11, done reversing
     let rev_loop = ctx.code_len
     code_byte(ctx, 0x4D)
     code_byte(ctx, 0x39)
     code_byte(ctx, 0xDA)  // CMP R10, R11
     code_byte(ctx, 0x0F)
     code_byte(ctx, 0x8D)  // JGE rev_done
-    let jge_rev_pos = ctx.code_len
+    let jge_rev_done_pos = ctx.code_len
     code_u32(ctx, 0)
 
     // Swap [R8+R10] and [R8+R11]
-    // REX 0x43: X=1 (extends index), B=1 (extends base)
-    // SIB for [R8+R10]: index=010(R10-8), base=000(R8-8) → 0x10
-    // SIB for [R8+R11]: index=011(R11-8), base=000(R8-8) → 0x18
     code_byte(ctx, 0x43)
     code_byte(ctx, 0x8A)
     code_byte(ctx, 0x04)
-    code_byte(ctx, 0x10)  // MOV AL, [R8+R10]
+    code_byte(ctx, 0x08)  // MOV AL, [R8+R10]
     code_byte(ctx, 0x43)
     code_byte(ctx, 0x8A)
     code_byte(ctx, 0x0C)
@@ -5177,7 +5303,7 @@ fn cg_int_to_str(ctx Ctx)
     code_byte(ctx, 0x43)
     code_byte(ctx, 0x88)
     code_byte(ctx, 0x0C)
-    code_byte(ctx, 0x10)  // MOV [R8+R10], CL
+    code_byte(ctx, 0x08)  // MOV [R8+R10], CL
     code_byte(ctx, 0x43)
     code_byte(ctx, 0x88)
     code_byte(ctx, 0x04)
@@ -5198,60 +5324,192 @@ fn cg_int_to_str(ctx Ctx)
     ctx.code_data[jmp_rev_pos + 2] = (((rev_disp / 65536) % 256) + 256) % 256
     ctx.code_data[jmp_rev_pos + 3] = (((rev_disp / 16777216) % 256) + 256) % 256
 
-    // rev_done:
     let rev_done_target = ctx.code_len
-    let jge_disp = rev_done_target - (jge_rev_pos + 4)
-    ctx.code_data[jge_rev_pos] = ((jge_disp % 256) + 256) % 256
-    ctx.code_data[jge_rev_pos + 1] = (((jge_disp / 256) % 256) + 256) % 256
-    ctx.code_data[jge_rev_pos + 2] = (((jge_disp / 65536) % 256) + 256) % 256
-    ctx.code_data[jge_rev_pos + 3] = (((jge_disp / 16777216) % 256) + 256) % 256
+    let jge_disp = rev_done_target - (jge_rev_done_pos + 4)
+    ctx.code_data[jge_rev_done_pos] = ((jge_disp % 256) + 256) % 256
+    ctx.code_data[jge_rev_done_pos + 1] = (((jge_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jge_rev_done_pos + 2] = (((jge_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jge_rev_done_pos + 3] = (((jge_disp / 16777216) % 256) + 256) % 256
 
-    // end: set length = R9, return buf pointer
-    let end_target = ctx.code_len
-    let end_disp = end_target - (jmp_end_pos + 4)
-    ctx.code_data[jmp_end_pos] = ((end_disp % 256) + 256) % 256
-    ctx.code_data[jmp_end_pos + 1] = (((end_disp / 256) % 256) + 256) % 256
-    ctx.code_data[jmp_end_pos + 2] = (((end_disp / 65536) % 256) + 256) % 256
-    ctx.code_data[jmp_end_pos + 3] = (((end_disp / 16777216) % 256) + 256) % 256
-
-    // Set length at [buf]: R9 + negative flag (R10 was overwritten by reversal,
-    // so we saved it... actually we need to use a different approach)
-    // The negative flag was in R10 but reversal overwrote it.
-    // Let's check if buf+8 == '-' to determine if negative.
-    // Actually, simpler: just add the negative flag BEFORE reversal.
-    // But we moved that... Let me use a different register.
-    // The reversal is done. R9 = digit count (NOT including '-').
-    // We need to add 1 if this was a negative number.
-    // Check if [buf+8] == '-' (45): if so, add 1 to R9.
-    emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
-    code_byte(ctx, 0x48)
-    code_byte(ctx, 0x8A)
-    code_byte(ctx, 0x40)
-    code_byte(ctx, 0x08)  // MOV AL, [RAX+8]
-    code_byte(ctx, 0x3C)
-    code_byte(ctx, 45)    // CMP AL, '-'
-    code_byte(ctx, 0x0F)
-    code_byte(ctx, 0x85)  // JNE skip_add
-    let jne_skip_pos = ctx.code_len
-    code_u32(ctx, 0)
-    // Negative: R9++
-    code_byte(ctx, 0x49)
-    code_byte(ctx, 0xFF)
-    code_byte(ctx, 0xC1)  // INC R9
-    let skip_add_target = ctx.code_len
-    let jne_skip_disp = skip_add_target - (jne_skip_pos + 4)
-    ctx.code_data[jne_skip_pos] = ((jne_skip_disp % 256) + 256) % 256
-    ctx.code_data[jne_skip_pos + 1] = (((jne_skip_disp / 256) % 256) + 256) % 256
-    ctx.code_data[jne_skip_pos + 2] = (((jne_skip_disp / 65536) % 256) + 256) % 256
-    ctx.code_data[jne_skip_pos + 3] = (((jne_skip_disp / 16777216) % 256) + 256) % 256
-
-    // Set length at [buf]
+    // Set length = R9 at [buf]
     emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
     code_byte(ctx, 0x4C)
     code_byte(ctx, 0x89)
     code_byte(ctx, 0x08)  // MOV [RAX], R9
 
-    // Return buf pointer
+    code_byte(ctx, 0xE9)
+    let jmp_end2_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    // negative_label:
+    let neg_target = ctx.code_len
+    let js_disp = neg_target - (js_pos + 4)
+    ctx.code_data[js_pos] = ((js_disp % 256) + 256) % 256
+    ctx.code_data[js_pos + 1] = (((js_disp / 256) % 256) + 256) % 256
+    ctx.code_data[js_pos + 2] = (((js_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[js_pos + 3] = (((js_disp / 16777216) % 256) + 256) % 256
+
+    // Negate value
+    emit_mov_r64_mem(ctx, RAX, RBP, val_off)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0xF7)
+    code_byte(ctx, 0xD8)  // NEG RAX
+    emit_mov_mem_r64(ctx, RBP, val_off, RAX)
+
+    // Write '-' at buf+8
+    emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x08)
+    emit_mov_r64_imm64(ctx, RCX, 45)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x08)  // MOV [RAX], CL
+
+    // R8 = buf+9, R9 = 0
+    emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x09)
+    emit_mov_r64_r64(ctx, R8, RAX)
+    emit_mov_r64_imm64(ctx, R9, 0)
+
+    // digit_loop_neg:
+    let digit_loop_neg = ctx.code_len
+    emit_mov_r64_mem(ctx, RAX, RBP, val_off)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x85)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x84)  // JE done_neg
+    let je_done_neg_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    emit_mov_r64_mem(ctx, RAX, RBP, val_off)
+    emit_mov_r64_imm64(ctx, RCX, 10)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x99)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0xF7)
+    code_byte(ctx, 0xF9)
+    emit_mov_r64_r64(ctx, RAX, RDX)
+    emit_mov_r64_imm64(ctx, RCX, 48)
+    emit_add_r64_r64(ctx, RAX, RCX)
+    code_byte(ctx, 0x41)
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x04)
+    code_byte(ctx, 0x08)
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0xFF)
+    code_byte(ctx, 0xC1)
+
+    emit_mov_r64_mem(ctx, RAX, RBP, val_off)
+    emit_mov_r64_imm64(ctx, RCX, 10)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x99)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0xF7)
+    code_byte(ctx, 0xF9)
+    emit_mov_mem_r64(ctx, RBP, val_off, RAX)
+
+    code_byte(ctx, 0xE9)
+    let jmp_neg_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let neg_loop_disp = digit_loop_neg - (jmp_neg_pos + 4)
+    ctx.code_data[jmp_neg_pos] = ((neg_loop_disp % 256) + 256) % 256
+    ctx.code_data[jmp_neg_pos + 1] = (((neg_loop_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_neg_pos + 2] = (((neg_loop_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_neg_pos + 3] = (((neg_loop_disp / 16777216) % 256) + 256) % 256
+
+    // done_neg: reverse, set length = R9+1
+    let done_neg_target = ctx.code_len
+    let je_neg_disp = done_neg_target - (je_done_neg_pos + 4)
+    ctx.code_data[je_done_neg_pos] = ((je_neg_disp % 256) + 256) % 256
+    ctx.code_data[je_done_neg_pos + 1] = (((je_neg_disp / 256) % 256) + 256) % 256
+    ctx.code_data[je_done_neg_pos + 2] = (((je_neg_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[je_done_neg_pos + 3] = (((je_neg_disp / 16777216) % 256) + 256) % 256
+
+    emit_mov_r64_imm64(ctx, R10, 0)
+    emit_mov_r64_r64(ctx, R11, R9)
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xEB)
+    code_byte(ctx, 0x01)
+
+    let rev_loop_neg = ctx.code_len
+    code_byte(ctx, 0x4D)
+    code_byte(ctx, 0x39)
+    code_byte(ctx, 0xDA)
+    code_byte(ctx, 0x0F)
+    code_byte(ctx, 0x8D)
+    let jge_rev_neg_done_pos = ctx.code_len
+    code_u32(ctx, 0)
+
+    code_byte(ctx, 0x43)
+    code_byte(ctx, 0x8A)
+    code_byte(ctx, 0x04)
+    code_byte(ctx, 0x08)
+    code_byte(ctx, 0x43)
+    code_byte(ctx, 0x8A)
+    code_byte(ctx, 0x0C)
+    code_byte(ctx, 0x18)
+    code_byte(ctx, 0x43)
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x0C)
+    code_byte(ctx, 0x08)
+    code_byte(ctx, 0x43)
+    code_byte(ctx, 0x88)
+    code_byte(ctx, 0x04)
+    code_byte(ctx, 0x18)
+
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0xFF)
+    code_byte(ctx, 0xC2)
+    code_byte(ctx, 0x49)
+    code_byte(ctx, 0xFF)
+    code_byte(ctx, 0xCB)
+    code_byte(ctx, 0xE9)
+    let jmp_rev_neg_pos = ctx.code_len
+    code_u32(ctx, 0)
+    let rev_neg_disp = rev_loop_neg - (jmp_rev_neg_pos + 4)
+    ctx.code_data[jmp_rev_neg_pos] = ((rev_neg_disp % 256) + 256) % 256
+    ctx.code_data[jmp_rev_neg_pos + 1] = (((rev_neg_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_rev_neg_pos + 2] = (((rev_neg_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_rev_neg_pos + 3] = (((rev_neg_disp / 16777216) % 256) + 256) % 256
+
+    let rev_neg_done_target = ctx.code_len
+    let jge_neg_disp = rev_neg_done_target - (jge_rev_neg_done_pos + 4)
+    ctx.code_data[jge_rev_neg_done_pos] = ((jge_neg_disp % 256) + 256) % 256
+    ctx.code_data[jge_rev_neg_done_pos + 1] = (((jge_neg_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jge_rev_neg_done_pos + 2] = (((jge_neg_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jge_rev_neg_done_pos + 3] = (((jge_neg_disp / 16777216) % 256) + 256) % 256
+
+    // Set length = R9 + 1
+    emit_mov_r64_r64(ctx, RAX, R9)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x83)
+    code_byte(ctx, 0xC0)
+    code_byte(ctx, 0x01)  // ADD RAX, 1
+    emit_mov_r64_mem(ctx, RCX, RBP, buf_off)
+    code_byte(ctx, 0x48)
+    code_byte(ctx, 0x89)
+    code_byte(ctx, 0x01)  // MOV [RCX], RAX
+
+    // tostr_end: RAX = buf
+    let tostr_end_target = ctx.code_len
+    let end1_disp = tostr_end_target - (jmp_end1_pos + 4)
+    ctx.code_data[jmp_end1_pos] = ((end1_disp % 256) + 256) % 256
+    ctx.code_data[jmp_end1_pos + 1] = (((end1_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_end1_pos + 2] = (((end1_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_end1_pos + 3] = (((end1_disp / 16777216) % 256) + 256) % 256
+    let end2_disp = tostr_end_target - (jmp_end2_pos + 4)
+    ctx.code_data[jmp_end2_pos] = ((end2_disp % 256) + 256) % 256
+    ctx.code_data[jmp_end2_pos + 1] = (((end2_disp / 256) % 256) + 256) % 256
+    ctx.code_data[jmp_end2_pos + 2] = (((end2_disp / 65536) % 256) + 256) % 256
+    ctx.code_data[jmp_end2_pos + 3] = (((end2_disp / 16777216) % 256) + 256) % 256
+
     emit_mov_r64_mem(ctx, RAX, RBP, buf_off)
 // ===========================================================================
 // AArch64 (ARM64) codegen — parallel path activated when ctx.target == 1
@@ -7479,6 +7737,10 @@ let WASM_OP_I64_XOR = 0x85
 let WASM_OP_I64_SHL = 0x86
 let WASM_OP_I64_SHR_S = 0x87
 
+// WASM opcodes — i32 arithmetic (used in print_int for counter manipulation)
+let WASM_OP_I32_ADD = 0x6A
+let WASM_OP_I32_SUB = 0x6B
+
 // WASM opcodes — conversions
 let WASM_OP_I32_WRAP_I64 = 0xA7
 
@@ -7806,14 +8068,67 @@ fn wasm_cg_call(ctx Ctx, e Node)
 
     // Builtins
     if fn_name == "println" or fn_name == "print"
-        // For WASM, we don't have stdout. We'll just drop the value.
-        // A real implementation would import WASI fd_write.
         let args = e.list
         if args.len() > 0
-            wasm_cg_expr(ctx, args[0])
-            w_byte(ctx, WASM_OP_DROP)
+            let arg = args[0]
+            // Dispatch based on argument type
+            if arg.kind == "string_lit"
+                wasm_cg_print_string_v2(ctx, arg.sval)
+                if fn_name == "println"
+                    wasm_cg_print_string_v2(ctx, "\n")
+                return
+            if arg.kind == "int_lit"
+                // Push addr (640), push value, store, then print
+                w_byte(ctx, WASM_OP_I32_CONST)
+                w_i32_leb128(ctx, 640)
+                w_byte(ctx, WASM_OP_I64_CONST)
+                w_i64_leb128(ctx, parse_int(arg.sval))
+                w_byte(ctx, WASM_OP_I64_STORE)
+                w_u32_leb128(ctx, 3)
+                w_u32_leb128(ctx, 0)
+                wasm_cg_print_int_v2(ctx)
+                if fn_name == "println"
+                    wasm_cg_print_string_v2(ctx, "\n")
+                return
+            if arg.kind == "bool_true"
+                wasm_cg_print_string_v2(ctx, "true")
+                if fn_name == "println"
+                    wasm_cg_print_string_v2(ctx, "\n")
+                return
+            if arg.kind == "bool_false"
+                wasm_cg_print_string_v2(ctx, "false")
+                if fn_name == "println"
+                    wasm_cg_print_string_v2(ctx, "\n")
+                return
+            if arg.kind == "ident"
+                if ctx.var_types.has(arg.sval)
+                    let vt = ctx.var_types[arg.sval]
+                    if vt == "str"
+                        // Load string address and print
+                        wasm_cg_expr(ctx, arg)
+                        // The string address is on the stack as i64.
+                        // We need to convert to a print operation.
+                        // For now, use a simplified approach: assume the value
+                        // is a string address and print via a helper.
+                        // TODO: implement string value printing
+                        w_byte(ctx, WASM_OP_DROP)
+                        if fn_name == "println"
+                            wasm_cg_print_string_v2(ctx, "\n")
+                        return
+            // Default: evaluate and print as int
+            // Push addr (640), push value, store, then print
+            w_byte(ctx, WASM_OP_I32_CONST)
+            w_i32_leb128(ctx, 640)
+            wasm_cg_expr(ctx, arg)
+            w_byte(ctx, WASM_OP_I64_STORE)
+            w_u32_leb128(ctx, 3)
+            w_u32_leb128(ctx, 0)
+            wasm_cg_print_int_v2(ctx)
+            if fn_name == "println"
+                wasm_cg_print_string_v2(ctx, "\n")
+            return
         if fn_name == "println"
-            // Drop the newline too (no-op for now)
+            wasm_cg_print_string_v2(ctx, "\n")
         return
     if fn_name == "len"
         let args = e.list
@@ -7837,9 +8152,11 @@ fn wasm_cg_call(ctx Ctx, e Node)
         wasm_cg_expr(ctx, args[ai])
         ai = ai + 1
     // Call: need the function index
+    // WASM function indices include the WASI import (fd_write at index 0),
+    // so user functions start at index 1.
     let fn_idx = wasm_get_fn_index(ctx, fn_name)
     w_byte(ctx, WASM_OP_CALL)
-    w_u32_leb128(ctx, fn_idx)
+    w_u32_leb128(ctx, fn_idx + 1)  // +1 for the WASI fd_write import
 
 // wasm_get_fn_index: get the WASM function index for a function name
 // Stored in ctx.fn_table (shared). For WASM, we store the index (not code offset).
@@ -8045,170 +8362,6 @@ fn wasm_cg_for_range(ctx Ctx, s Node)
     w_byte(ctx, WASM_OP_END)  // end loop
     w_byte(ctx, WASM_OP_END)  // end block
 
-// ---------------------------------------------------------------------------
-// WASM function codegen
-// ---------------------------------------------------------------------------
-
-fn wasm_cg_function(ctx Ctx, fn_decl Node, is_main bool)
-    let fn_name = fn_decl.sval
-    // Register the function (assign it an index)
-    let fn_idx = wasm_get_fn_index(ctx, fn_name)
-    // Reset local state for this function
-    ctx.var_slots = {}
-    ctx.next_slot = 0  // WASM locals start at 0
-    ctx.var_types = {}
-
-    // Save the start of this function's code (for later assembly)
-    // We store function code positions in a separate table
-    let code_start = ctx.code_len
-
-    // Save params: in WASM, params are locals 0..n-1
-    let params = fn_decl.a
-    let mut pi = 0
-    while pi < params.len()
-        let param = params[pi]
-        ctx.var_slots[param.sval] = pi
-        ctx.var_types[param.sval] = param.extra
-        pi = pi + 1
-    // next_slot = number of params (next local index)
-    ctx.next_slot = params.len()
-
-    // Record the number of locals (non-param locals)
-    // We'll patch this later
-    let locals_count_pos = ctx.code_len
-    // Placeholder: we'll write the locals count and types here after the body
-    // For now, just remember the position
-    ctx.fn_ret_types[fn_name + "__locals_pos__"] = code_start
-    ctx.fn_ret_types[fn_name + "__param_count__"] = params.len()
-
-    ctx.is_main = is_main
-    let body = fn_decl.list
-    let mut i = 0
-    while i < body.len()
-        wasm_cg_stmt(ctx, body[i])
-        i = i + 1
-
-    // Default return: push 0 and return
-    w_byte(ctx, WASM_OP_I64_CONST)
-    w_i64_leb128(ctx, 0)
-    w_byte(ctx, WASM_OP_END)  // end function body
-
-// ---------------------------------------------------------------------------
-// WASM module builder
-// ---------------------------------------------------------------------------
-
-// wasm_build_module: assemble the complete WASM module
-// This is called after all functions are compiled.
-fn wasm_build_module(ctx Ctx, output_fd int) int
-    // Write WASM magic and version
-    write_byte(output_fd, 0)
-    sys.write(output_fd, "asm", 3)
-    write_byte(output_fd, 1)
-    write_byte(output_fd, 0)
-    write_byte(output_fd, 0)
-    write_byte(output_fd, 0)
-
-    // === Type section ===
-    // For now, single function type: () -> i64
-    write_byte(output_fd, WASM_SEC_TYPE)
-    // Section: 1 (count) + 1 (0x60) + 1 (0 params) + 1 (1 result) + 1 (i64) = 5
-    w_u32_leb128_to_fd(output_fd, 5)
-    w_u32_leb128_to_fd(output_fd, 1)  // 1 type
-    write_byte(output_fd, WASM_TYPE_FUNC)  // 0x60
-    write_byte(output_fd, 0)  // 0 params
-    write_byte(output_fd, 1)  // 1 result
-    write_byte(output_fd, WASM_TYPE_I64)  // i64
-
-    // === Function section ===
-    write_byte(output_fd, WASM_SEC_FUNCTION)
-    w_u32_leb128_to_fd(output_fd, 2)  // section size: 1 (count) + 1 (type idx)
-    w_u32_leb128_to_fd(output_fd, 1)  // 1 function
-    w_u32_leb128_to_fd(output_fd, 0)  // type index 0
-
-    // === Memory section ===
-    // Define 1 page (64KB) of linear memory
-    write_byte(output_fd, WASM_SEC_MEMORY)
-    w_u32_leb128_to_fd(output_fd, 3)  // section size: 1 (count) + 1 (limits flag) + 1 (initial)
-    w_u32_leb128_to_fd(output_fd, 1)  // 1 memory
-    write_byte(output_fd, WASM_LIMITS_NO_MAX)  // no max
-    w_u32_leb128_to_fd(output_fd, 1)  // initial 1 page
-
-    // === Export section ===
-    // Export "main" as "_start" and export "memory"
-    write_byte(output_fd, WASM_SEC_EXPORT)
-    // Section size: compute
-    // main export: 7 (name len) + "_start" (6) + 1 (kind) + 1 (idx) = 14... wait
-    // name = "_start" = 6 bytes, len = 6
-    // "_start" export: 1 (len) + 6 (name) + 1 (kind=func) + leb128(0) = 9
-    // "memory" export: 1 (len) + 6 (name) + 1 (kind=memory) + leb128(0) = 9
-    // total = 1 (count) + 9 + 9 = 19
-    w_u32_leb128_to_fd(output_fd, 19)  // section size
-    w_u32_leb128_to_fd(output_fd, 2)  // 2 exports
-    // Export _start (main function, index 0)
-    w_u32_leb128_to_fd(output_fd, 6)  // name length
-    sys.write(output_fd, "_start", 6)
-    write_byte(output_fd, WASM_EXPORT_FUNC)
-    w_u32_leb128_to_fd(output_fd, 0)  // function index 0
-    // Export memory
-    w_u32_leb128_to_fd(output_fd, 6)  // name length
-    sys.write(output_fd, "memory", 6)
-    write_byte(output_fd, WASM_EXPORT_MEMORY)
-    w_u32_leb128_to_fd(output_fd, 0)  // memory index 0
-
-    // === Code section ===
-    write_byte(output_fd, WASM_SEC_CODE)
-    // For now, we write all code as a single function body (main).
-    // Multi-function support requires tracking per-function code offsets.
-    let total_code_size = ctx.code_len
-    // Count the number of locals (excluding params, which are 0 for main)
-    // We track this via ctx.next_slot (next local index)
-    let nlocals = ctx.next_slot
-    // body_size = local_decls_size + total_code_size
-    // local_decls_size = 1 (count) + [if nlocals>0: leb128(nlocals) + 1 (type)]
-    let mut local_decls_size = 1  // just the count (0 groups)
-    if nlocals > 0
-        local_decls_size = 1 + wasm_leb128_size(nlocals) + 1  // 1 group + n + type
-    let body_size = local_decls_size + total_code_size
-    let body_size_leb_len = wasm_leb128_size(body_size)
-    let code_section_size = 1 + body_size_leb_len + body_size
-    w_u32_leb128_to_fd(output_fd, code_section_size)
-    w_u32_leb128_to_fd(output_fd, 1)  // 1 function (just main)
-    // Write main's body
-    w_u32_leb128_to_fd(output_fd, body_size)
-    // Local declarations
-    if nlocals > 0
-        w_u32_leb128_to_fd(output_fd, 1)  // 1 local declaration group
-        w_u32_leb128_to_fd(output_fd, nlocals)  // n locals
-        write_byte(output_fd, WASM_TYPE_I64)  // type: i64
-    else
-        w_u32_leb128_to_fd(output_fd, 0)  // 0 local decls
-    // Write the code
-    let mut ci = 0
-    while ci < ctx.code_len
-        write_byte(output_fd, ctx.code_data[WASM_BUF_BASE + ci])
-        ci = ci + 1
-
-    // === Data section ===
-    // Write string literals
-    if ctx.data_len > 0
-        write_byte(output_fd, WASM_SEC_DATA)
-        // Section: count + for each: 0 (memory index) + offset expr + size + data
-        let data_size = 1 + 1 + 1 + 1 + 1 + ctx.data_len  // approx
-        w_u32_leb128_to_fd(output_fd, data_size)
-        w_u32_leb128_to_fd(output_fd, 1)  // 1 data segment
-        write_byte(output_fd, 0)  // memory index 0
-        // Offset: i32.const 1024
-        write_byte(output_fd, WASM_OP_I32_CONST)
-        w_i32_leb128_to_fd(output_fd, WASM_STRING_BASE)
-        write_byte(output_fd, WASM_OP_END)
-        // Data size and bytes
-        w_u32_leb128_to_fd(output_fd, ctx.data_len)
-        let mut di = 0
-        while di < ctx.data_len
-            write_byte(output_fd, ctx.data_data[di])
-            di = di + 1
-
-    return 0
 
 // w_u32_leb128_to_fd: write LEB128 directly to file descriptor
 fn w_u32_leb128_to_fd(fd int, v int)
@@ -8253,3 +8406,1462 @@ fn w_i32_leb128_to_fd(fd int, v int)
             more = true
         if not more
             write_byte(fd, b)
+// ===========================================================================
+// WASM Multi-Function + WASI Upgrade
+// ===========================================================================
+// Replaces the single-function stub with full multi-function support and
+// WASI fd_write import for stdout printing.
+//
+// Per-function metadata is stored in the break_fixups table (unused for WASM):
+//   break_fixups[fn_idx * 4 + 0] = code_start_offset
+//   break_fixups[fn_idx * 4 + 1] = code_end_offset
+//   break_fixups[fn_idx * 4 + 2] = param_count
+//   break_fixups[fn_idx * 4 + 3] = local_count (non-param locals)
+// ===========================================================================
+
+// WASI import function indices (imported functions come first)
+// Index 0: fd_write(fd, iovs, iovs_len, nwritten_ptr) -> i32
+let WASM_WASI_FD_WRITE = 0
+
+// wasm_cg_function_v2: multi-function version
+fn wasm_cg_function_v2(ctx Ctx, fn_decl Node, is_main bool)
+    let fn_name = fn_decl.sval
+    // Register the function (assign it an index)
+    let fn_idx = wasm_get_fn_index(ctx, fn_name)
+    // Reset local state for this function
+    ctx.var_slots = {}
+    ctx.next_slot = 0  // WASM locals start at 0
+    ctx.var_types = {}
+
+    // Save params: in WASM, params are locals 0..n-1
+    let params = fn_decl.a
+    let mut pi = 0
+    while pi < params.len()
+        let param = params[pi]
+        ctx.var_slots[param.sval] = pi
+        ctx.var_types[param.sval] = param.extra
+        pi = pi + 1
+    // next_slot = number of params (next local index)
+    ctx.next_slot = params.len()
+    let param_count = params.len()
+
+    // Record the start of this function's code
+    let code_start = ctx.code_len
+
+    ctx.is_main = is_main
+    let body = fn_decl.list
+    let mut i = 0
+    while i < body.len()
+        wasm_cg_stmt(ctx, body[i])
+        i = i + 1
+
+    // Default return: push 0 and end
+    w_byte(ctx, WASM_OP_I64_CONST)
+    w_i64_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_END)  // end function body
+
+    let code_end = ctx.code_len
+    let local_count = ctx.next_slot - param_count
+
+    // Store per-function metadata in break_fixups (4 entries per function)
+    // fn_idx is the WASM function index (including the 1 WASI import)
+    let wasm_fn_idx = fn_idx + 1  // +1 because fd_write is index 0
+    ctx.break_fixups[wasm_fn_idx * 4 + 0] = code_start
+    ctx.break_fixups[wasm_fn_idx * 4 + 1] = code_end
+    ctx.break_fixups[wasm_fn_idx * 4 + 2] = param_count
+    ctx.break_fixups[wasm_fn_idx * 4 + 3] = local_count
+
+// wasm_build_module_v2: multi-function + WASI version
+fn wasm_build_module_v2(ctx Ctx, output_fd int) int
+    let n_user_fns = ctx.fn_count
+
+    // Write WASM magic and version
+    write_byte(output_fd, 0)
+    sys.write(output_fd, "asm", 3)
+    write_byte(output_fd, 1)
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)
+
+    // === Type section ===
+    // Type 0: (i32, i32, i32, i32) -> i32  (WASI fd_write)
+    // Type 1+: () -> i64  (user functions, all return i64 for simplicity)
+    //   Actually user functions may have params. For simplicity, we use one
+    //   type per param count. But that's complex. Let's just emit one type
+    //   per user function, with the right param count.
+    write_byte(output_fd, WASM_SEC_TYPE)
+    // Compute type section size
+    // Type 0 (fd_write): 1 (0x60) + 1 (4 params) + 4 (i32*4) + 1 (1 result) + 1 (i32) = 8
+    // Each user fn type: 1 (0x60) + 1 (param_count) + param_count + 1 (1 result) + 1 (i64)
+    let mut type_size = 1  // count
+    type_size = type_size + 8  // fd_write type
+    // We need to know each function's param count
+    // For now, emit one type per user function (all with 0 params, return i64)
+    // and a special type for functions with params
+    // Actually, let's emit 2 types: () -> i64 and (i64, i64) -> i64, etc.
+    // For simplicity, let's count how many distinct param counts we have.
+    // For now, just emit one type per function.
+    let mut fi = 0
+    while fi < n_user_fns
+        let wasm_fn_idx = fi + 1
+        let param_count = ctx.break_fixups[wasm_fn_idx * 4 + 2]
+        type_size = type_size + 1 + 1 + param_count + 1 + 1  // 0x60 + pcount + params + 1 + i64
+        fi = fi + 1
+    w_u32_leb128_to_fd(output_fd, type_size)
+    w_u32_leb128_to_fd(output_fd, n_user_fns + 1)  // +1 for fd_write type
+    // Type 0: fd_write
+    write_byte(output_fd, WASM_TYPE_FUNC)
+    write_byte(output_fd, 4)  // 4 params
+    write_byte(output_fd, WASM_TYPE_I32)  // fd
+    write_byte(output_fd, WASM_TYPE_I32)  // iovs ptr
+    write_byte(output_fd, WASM_TYPE_I32)  // iovs len
+    write_byte(output_fd, WASM_TYPE_I32)  // nwritten ptr
+    write_byte(output_fd, 1)  // 1 result
+    write_byte(output_fd, WASM_TYPE_I32)  // i32 (bytes written)
+    // User function types (one per function, type index = fn_idx + 1)
+    fi = 0
+    while fi < n_user_fns
+        let wasm_fn_idx = fi + 1
+        let param_count = ctx.break_fixups[wasm_fn_idx * 4 + 2]
+        write_byte(output_fd, WASM_TYPE_FUNC)
+        w_u32_leb128_to_fd(output_fd, param_count)
+        let mut pi = 0
+        while pi < param_count
+            write_byte(output_fd, WASM_TYPE_I64)  // all params are i64
+            pi = pi + 1
+        write_byte(output_fd, 1)  // 1 result
+        write_byte(output_fd, WASM_TYPE_I64)  // i64
+        fi = fi + 1
+
+    // === Import section ===
+    // Import fd_write from wasi_snapshot_preview1
+    write_byte(output_fd, 2)  // WASM_SEC_IMPORT
+    // Compute size: 1 (module len) + module + 1 (name len) + name + 1 (kind) + 1 (type idx)
+    // module = "wasi_snapshot_preview1" = 24 bytes
+    // name = "fd_write" = 8 bytes
+    // total = 1 + 24 + 1 + 8 + 1 + 1 = 36
+    // plus count = 1
+    let import_size = 1 + 1 + 24 + 1 + 8 + 1 + 1
+    w_u32_leb128_to_fd(output_fd, import_size)
+    w_u32_leb128_to_fd(output_fd, 1)  // 1 import
+    w_u32_leb128_to_fd(output_fd, 24)
+    sys.write(output_fd, "wasi_snapshot_preview1", 24)
+    w_u32_leb128_to_fd(output_fd, 8)
+    sys.write(output_fd, "fd_write", 8)
+    write_byte(output_fd, 0)  // import kind: function
+    w_u32_leb128_to_fd(output_fd, 0)  // type index 0
+
+    // === Function section ===
+    write_byte(output_fd, WASM_SEC_FUNCTION)
+    // Size: 1 (count) + n_user_fns * 1 (type idx, assuming < 128)
+    let func_section_size = 1 + n_user_fns
+    w_u32_leb128_to_fd(output_fd, func_section_size)
+    w_u32_leb128_to_fd(output_fd, n_user_fns)  // function count
+    // Each user function's type index = fn_idx + 1
+    fi = 0
+    while fi < n_user_fns
+        w_u32_leb128_to_fd(output_fd, fi + 1)  // type index
+        fi = fi + 1
+
+    // === Memory section ===
+    write_byte(output_fd, WASM_SEC_MEMORY)
+    w_u32_leb128_to_fd(output_fd, 3)
+    w_u32_leb128_to_fd(output_fd, 1)
+    write_byte(output_fd, WASM_LIMITS_NO_MAX)
+    w_u32_leb128_to_fd(output_fd, 1)
+
+    // === Export section ===
+    // Export "main" as "_start" and export "memory"
+    // main's WASM index = main's user fn idx + 1 (for the import)
+    // We need to find main's index. It's stored in ctx.fn_table["main"].
+    let mut main_wasm_idx = 1  // default: first user function (main is compiled first)
+    if ctx.fn_table.has("main")
+        main_wasm_idx = ctx.fn_table["main"] + 1  // +1 for the WASI import
+    write_byte(output_fd, WASM_SEC_EXPORT)
+    // "_start" export: 1 (len) + 6 (name) + 1 (kind) + leb128(main_idx) = 9 (if idx < 128)
+    // "memory" export: 1 (len) + 6 (name) + 1 (kind) + 1 (idx) = 9
+    let export_size = 1 + 9 + 9  // count + _start + memory
+    w_u32_leb128_to_fd(output_fd, export_size)
+    w_u32_leb128_to_fd(output_fd, 2)  // 2 exports
+    // Export _start
+    w_u32_leb128_to_fd(output_fd, 6)
+    sys.write(output_fd, "_start", 6)
+    write_byte(output_fd, WASM_EXPORT_FUNC)
+    w_u32_leb128_to_fd(output_fd, main_wasm_idx)
+    // Export memory
+    w_u32_leb128_to_fd(output_fd, 6)
+    sys.write(output_fd, "memory", 6)
+    write_byte(output_fd, WASM_EXPORT_MEMORY)
+    w_u32_leb128_to_fd(output_fd, 0)
+
+    // === Code section ===
+    write_byte(output_fd, WASM_SEC_CODE)
+    // Compute total code section size:
+    // 1 (count) + for each function: leb128(body_size) + body_size
+    // body_size = local_decls_size + code_size
+    // local_decls_size = 1 (if 0 locals) or 1 + leb128(local_count) + 1 (if >0)
+    let mut total_code_section = 1  // count
+    fi = 0
+    while fi < n_user_fns
+        let wasm_fn_idx = fi + 1
+        let code_start = ctx.break_fixups[wasm_fn_idx * 4 + 0]
+        let code_end = ctx.break_fixups[wasm_fn_idx * 4 + 1]
+        let local_count = ctx.break_fixups[wasm_fn_idx * 4 + 3]
+        let code_size = code_end - code_start
+        let mut local_decls_size = 1
+        if local_count > 0
+            local_decls_size = 1 + wasm_leb128_size(local_count) + 1
+        let body_size = local_decls_size + code_size
+        total_code_section = total_code_section + wasm_leb128_size(body_size) + body_size
+        fi = fi + 1
+    w_u32_leb128_to_fd(output_fd, total_code_section)
+    w_u32_leb128_to_fd(output_fd, n_user_fns)  // function count
+    // Write each function body
+    fi = 0
+    while fi < n_user_fns
+        let wasm_fn_idx = fi + 1
+        let code_start = ctx.break_fixups[wasm_fn_idx * 4 + 0]
+        let code_end = ctx.break_fixups[wasm_fn_idx * 4 + 1]
+        let local_count = ctx.break_fixups[wasm_fn_idx * 4 + 3]
+        let code_size = code_end - code_start
+        let mut local_decls_size = 1
+        if local_count > 0
+            local_decls_size = 1 + wasm_leb128_size(local_count) + 1
+        let body_size = local_decls_size + code_size
+        // Write body size
+        w_u32_leb128_to_fd(output_fd, body_size)
+        // Write local declarations
+        if local_count > 0
+            w_u32_leb128_to_fd(output_fd, 1)  // 1 group
+            w_u32_leb128_to_fd(output_fd, local_count)
+            write_byte(output_fd, WASM_TYPE_I64)
+        else
+            w_u32_leb128_to_fd(output_fd, 0)
+        // Write the code
+        let mut ci = code_start
+        while ci < code_end
+            write_byte(output_fd, ctx.code_data[WASM_BUF_BASE + ci])
+            ci = ci + 1
+        fi = fi + 1
+
+    // === Data section ===
+    if ctx.data_len > 0
+        write_byte(output_fd, WASM_SEC_DATA)
+        let data_size = 1 + 1 + 1 + 1 + 1 + ctx.data_len  // count + mem_idx + i32.const + offset + end + size + data
+        w_u32_leb128_to_fd(output_fd, data_size)
+        w_u32_leb128_to_fd(output_fd, 1)  // 1 segment
+        write_byte(output_fd, 0)  // memory index 0
+        write_byte(output_fd, WASM_OP_I32_CONST)
+        w_i32_leb128_to_fd(output_fd, WASM_STRING_BASE)
+        write_byte(output_fd, WASM_OP_END)
+        w_u32_leb128_to_fd(output_fd, ctx.data_len)
+        let mut di = 0
+        while di < ctx.data_len
+            write_byte(output_fd, ctx.data_data[di])
+            di = di + 1
+
+    return 0
+
+// wasm_cg_print_string_v2: print a string literal via WASI fd_write
+// Layout: store string at memory, set up iov, call fd_write
+fn wasm_cg_print_string_v2(ctx Ctx, s str)
+    // Add string to data section
+    let mem_addr = wasm_add_string(ctx, s)
+    let str_len = s.len()
+    // We need to call fd_write(1, iov, 1, nwritten_ptr)
+    // iov is a struct: [ptr:4, len:4] at some memory address
+    // nwritten_ptr is a 4-byte location for the result
+    //
+    // We'll use a temporary area in linear memory for iov and nwritten:
+    //   iov at address 512 (8 bytes: ptr + len)
+    //   nwritten at address 520 (4 bytes)
+    let iov_addr = 512
+    let nwritten_addr = 520
+
+    // WASM store semantics: push ADDRESS first (deeper), then VALUE (top).
+    // Store pops value first, then address.
+    // String layout: [len:8 | data... | null:1] starting at mem_addr.
+    // We write the DATA portion (mem_addr + 8), not the length header.
+    let data_addr = mem_addr + 8
+    // Store string data pointer (i32) at iov_addr
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, iov_addr)  // push address (deeper)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, data_addr & 0xFFFFFFFF)  // push value (top)
+    w_byte(ctx, WASM_OP_I32_STORE)
+    w_u32_leb128(ctx, 2)  // align
+    w_u32_leb128(ctx, 0)  // offset
+
+    // Store string length (i32) at iov_addr + 4
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, iov_addr + 4)  // push address
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, str_len)  // push value
+    w_byte(ctx, WASM_OP_I32_STORE)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+
+    // Call fd_write(1, iov_addr, 1, nwritten_addr)
+    // Args are pushed in order: fd, iov, niov, nwritten
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 1)  // fd = 1 (stdout)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, iov_addr)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 1)  // 1 iov
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, nwritten_addr)
+    w_byte(ctx, WASM_OP_CALL)
+    w_u32_leb128(ctx, WASM_WASI_FD_WRITE)  // imported function index 0
+    w_byte(ctx, WASM_OP_DROP)  // discard fd_write return value
+    // Push 0 (i64) so that expr_stmt's drop has something to drop
+    w_byte(ctx, WASM_OP_I64_CONST)
+    w_i64_leb128(ctx, 0)
+
+// ===========================================================================
+// PE64 (Windows) linker — produces minimal Windows console executables
+// ===========================================================================
+
+let PE_IMAGE_BASE = 0x140000000
+let PE_SECTION_ALIGNMENT = 0x1000
+let PE_FILE_ALIGNMENT = 0x200
+let PE_TEXT_RVA = 0x1000
+
+fn build_pe64(ctx Ctx, output_fd int) int
+    let code_len = ctx.code_len
+    let data_len = ctx.data_len
+
+    let headers_size_raw = 64 + 4 + 20 + 240 + 3 * 40
+    let headers_size = pe_align_up(headers_size_raw, PE_FILE_ALIGNMENT)
+    let text_file_size = pe_align_up(code_len, PE_FILE_ALIGNMENT)
+    let rdata_file_size = pe_align_up(data_len, PE_FILE_ALIGNMENT)
+
+    let text_rva = PE_TEXT_RVA
+    let rdata_rva = pe_align_up(text_rva + code_len, PE_SECTION_ALIGNMENT)
+    let data_rva = pe_align_up(rdata_rva + data_len, PE_SECTION_ALIGNMENT)
+    let image_size = pe_align_up(data_rva + 16, PE_SECTION_ALIGNMENT)
+
+    let entry_rva = text_rva
+
+    // DOS header (64 bytes)
+    write_byte(output_fd, 0x4D)
+    write_byte(output_fd, 0x5A)
+    let mut i = 2
+    while i < 60
+        write_byte(output_fd, 0)
+        i = i + 1
+    write_u32_le(output_fd, 64)
+
+    // PE signature
+    write_byte(output_fd, 0x50)
+    write_byte(output_fd, 0x45)
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)
+
+    // COFF header (20 bytes)
+    write_byte(output_fd, 0x64)
+    write_byte(output_fd, 0x86)
+    write_byte(output_fd, 3)
+    write_byte(output_fd, 0)
+    write_u32_le(output_fd, 0)
+    write_u32_le(output_fd, 0)
+    write_u32_le(output_fd, 0)
+    write_byte(output_fd, 240)
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0x22)
+    write_byte(output_fd, 0)
+
+    // Optional header (240 bytes, PE32+)
+    write_byte(output_fd, 0x0B)
+    write_byte(output_fd, 0x02)
+    write_byte(output_fd, 14)
+    write_byte(output_fd, 0)
+    write_u32_le(output_fd, text_file_size)
+    write_u32_le(output_fd, rdata_file_size)
+    write_u32_le(output_fd, 0)
+    write_u32_le(output_fd, entry_rva)
+    write_u32_le(output_fd, text_rva)
+    // Note: PE32+ has NO BaseOfData field (removed from PE32).
+    // After BaseOfCode comes ImageBase directly.
+    write_u64_le(output_fd, PE_IMAGE_BASE)
+    write_u32_le(output_fd, PE_SECTION_ALIGNMENT)
+    write_u32_le(output_fd, PE_FILE_ALIGNMENT)
+    // 6 version fields × 2 bytes = 12 bytes
+    write_byte(output_fd, 6)   // MajorOSVer = 6
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)   // MinorOSVer = 0
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)   // MajorImageVer = 0
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)   // MinorImageVer = 0
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 6)   // MajorSubsysVer = 6
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0)   // MinorSubsysVer = 0
+    write_byte(output_fd, 0)
+    write_u32_le(output_fd, 0) // Win32VersionValue
+    write_u32_le(output_fd, image_size)
+    write_u32_le(output_fd, headers_size)
+    write_u32_le(output_fd, 0)
+    write_byte(output_fd, 3)
+    write_byte(output_fd, 0)
+    write_byte(output_fd, 0x40)
+    write_byte(output_fd, 0x01)
+    write_u64_le(output_fd, 0x100000)
+    write_u64_le(output_fd, 0x1000)
+    write_u64_le(output_fd, 0x100000)
+    write_u64_le(output_fd, 0x1000)
+    write_u32_le(output_fd, 0)
+    write_u32_le(output_fd, 16)
+    let mut di = 0
+    while di < 128
+        write_byte(output_fd, 0)
+        di = di + 1
+
+    // Section headers
+    // Note: pe_write_section_header computes characteristics from the name
+    // to avoid the 7-argument calling convention issue with large hex values
+    pe_write_section_header(output_fd, ".text", code_len, text_rva, text_file_size, headers_size)
+    pe_write_section_header(output_fd, ".rdata", data_len, rdata_rva, rdata_file_size, headers_size + text_file_size)
+    pe_write_section_header(output_fd, ".data", 0, data_rva, 0, headers_size + text_file_size + rdata_file_size)
+
+    // Pad headers
+    let written_so_far = 64 + 4 + 20 + 240 + 3 * 40
+    let mut pad = written_so_far
+    while pad < headers_size
+        write_byte(output_fd, 0)
+        pad = pad + 1
+
+    // .text section
+    let mut ci = 0
+    while ci < code_len
+        write_byte(output_fd, ctx.code_data[ci])
+        ci = ci + 1
+    pad = code_len
+    while pad < text_file_size
+        write_byte(output_fd, 0)
+        pad = pad + 1
+
+    // .rdata section
+    di = 0
+    while di < data_len
+        write_byte(output_fd, ctx.data_data[di])
+        di = di + 1
+    pad = data_len
+    while pad < rdata_file_size
+        write_byte(output_fd, 0)
+        pad = pad + 1
+
+    return 0
+
+fn pe_write_section_header(fd int, name str, virtual_size int, rva int, raw_size int, raw_offset int)
+    let name_bytes = name.bytes()
+    let mut ni = 0
+    while ni < 8
+        if ni < name_bytes.len()
+            write_byte(fd, name_bytes[ni])
+        else
+            write_byte(fd, 0)
+        ni = ni + 1
+    write_u32_le(fd, virtual_size)
+    write_u32_le(fd, rva)
+    write_u32_le(fd, raw_size)
+    write_u32_le(fd, raw_offset)
+    write_u32_le(fd, 0)
+    write_u32_le(fd, 0)
+    write_byte(fd, 0)
+    write_byte(fd, 0)
+    write_byte(fd, 0)
+    write_byte(fd, 0)
+    // Compute characteristics based on section name
+    let mut char_byte0 = 32
+    let mut char_byte3 = 96
+    if name == ".rdata"
+        char_byte0 = 64
+        char_byte3 = 64
+    if name == ".data"
+        char_byte0 = 128
+        char_byte3 = 192
+    write_byte(fd, char_byte0)
+    write_byte(fd, 0)
+    write_byte(fd, 0)
+    write_byte(fd, char_byte3)
+
+fn pe_align_up(val int, alignment int) int
+    let rem = val % alignment
+    if rem == 0
+        return val
+    return val + alignment - rem
+// ===========================================================================
+// Mach-O 64-bit (macOS) linker — produces minimal macOS executables
+// ===========================================================================
+// Layout:
+//   Mach-O header (32 bytes): magic, cputype, filetype, ncmds, sizeofcmds
+//   LC_SEGMENT_64 (__TEXT): 72 bytes cmd + 80 bytes per section
+//   LC_SEGMENT_64 (__DATA): 72 bytes cmd + 80 bytes per section
+//   LC_UNIXTHREAD: thread state (entry point)
+//   __TEXT,__text: code
+//   __TEXT,__data: read-only data
+//
+// For simplicity, we use LC_UNIXTHREAD (older format) instead of LC_MAIN.
+// Entry point is set in the thread state.
+// ===========================================================================
+
+let MACHO_MAGIC_64 = 0xFEEDFACF
+let MACHO_CPU_TYPE_X86_64 = 0x01000007
+let MACHO_CPU_SUBTYPE_X86_64_ALL = 3
+let MACHO_FILETYPE_EXECUTE = 2
+let MACHO_LC_SEGMENT_64 = 0x19
+let MACHO_LC_UNIXTHREAD = 0x05
+let MACHO_PAGE_SIZE = 0x1000
+let MACHO_TEXT_BASE = 0x100000000
+let MACHO_THREAD_STATE_SIZE = 168  // x86_64 thread state
+
+fn build_macho64(ctx Ctx, output_fd int) int
+    let code_len = ctx.code_len
+    let data_len = ctx.data_len
+
+    // Header (32) + 2 segment cmds (72 each) + 2 sections (80 each) + unixthread (16 + 168)
+    let header_size = 32
+    let text_seg_cmd_size = 72 + 80  // LC_SEGMENT_64 + 1 section
+    let data_seg_cmd_size = 72 + 80
+    let unixthread_cmd_size = 16 + MACHO_THREAD_STATE_SIZE
+    let total_cmds_size = text_seg_cmd_size + data_seg_cmd_size + unixthread_cmd_size
+    let ncmds = 3
+
+    let text_file_offset = header_size + total_cmds_size
+    let text_file_size = code_len
+    let data_file_offset = text_file_offset + text_file_size
+    let data_file_size = data_len
+
+    // VM layout
+    let text_vmaddr = MACHO_TEXT_BASE
+    let text_vmsize = macho_align_up(code_len + data_len, MACHO_PAGE_SIZE)
+    let data_vmaddr = 0  // no separate data segment for simplicity
+    let data_vmsize = 0
+
+    // === Mach-O header (32 bytes) ===
+    write_u32_le(output_fd, MACHO_MAGIC_64)
+    write_u32_le(output_fd, MACHO_CPU_TYPE_X86_64)
+    write_u32_le(output_fd, MACHO_CPU_SUBTYPE_X86_64_ALL)
+    write_u32_le(output_fd, MACHO_FILETYPE_EXECUTE)
+    write_u32_le(output_fd, ncmds)
+    write_u32_le(output_fd, total_cmds_size)
+    write_u32_le(output_fd, 0)  // flags
+    write_u32_le(output_fd, 0)  // reserved
+
+    // === LC_SEGMENT_64 (__TEXT) ===
+    write_u32_le(output_fd, MACHO_LC_SEGMENT_64)
+    write_u32_le(output_fd, text_seg_cmd_size)  // cmdsize
+    macho_write_segname(output_fd, "__TEXT")
+    write_u64_le(output_fd, text_vmaddr)
+    write_u64_le(output_fd, text_vmsize)
+    write_u64_le(output_fd, text_file_offset)
+    write_u64_le(output_fd, text_file_size + data_file_size)  // file size includes data
+    write_u32_le(output_fd, 7)  // maxprot: RWX
+    write_u32_le(output_fd, 7)  // initprot: RWX
+    write_u32_le(output_fd, 1)  // nsects
+    write_u32_le(output_fd, 0)  // flags
+
+    // __TEXT,__text section
+    macho_write_sectname(output_fd, "__text")
+    macho_write_segname(output_fd, "__TEXT")
+    write_u64_le(output_fd, text_vmaddr)  // addr
+    write_u64_le(output_fd, code_len)  // size
+    write_u32_le(output_fd, text_file_offset)  // offset
+    write_u32_le(output_fd, 0)  // align
+    write_u32_le(output_fd, 0)  // reloff
+    write_u32_le(output_fd, 0)  // nreloc
+    write_u32_le(output_fd, 0)  // flags
+    write_u32_le(output_fd, 0)  // reserved1
+    write_u32_le(output_fd, 0)  // reserved2
+    write_u32_le(output_fd, 0)  // reserved3 (for 64-bit)
+
+    // === LC_SEGMENT_64 (__DATA) ===
+    write_u32_le(output_fd, MACHO_LC_SEGMENT_64)
+    write_u32_le(output_fd, data_seg_cmd_size)
+    macho_write_segname(output_fd, "__DATA")
+    write_u64_le(output_fd, 0)  // vmaddr (unused)
+    write_u64_le(output_fd, 0)  // vmsize
+    write_u64_le(output_fd, 0)  // fileoff
+    write_u64_le(output_fd, 0)  // filesize
+    write_u32_le(output_fd, 3)  // maxprot: RW
+    write_u32_le(output_fd, 3)  // initprot: RW
+    write_u32_le(output_fd, 0)  // nsects
+    write_u32_le(output_fd, 0)  // flags
+
+    // === LC_UNIXTHREAD ===
+    write_u32_le(output_fd, MACHO_LC_UNIXTHREAD)
+    write_u32_le(output_fd, unixthread_cmd_size)
+    // x86_64 thread state: flavor=4 (x86_THREAD_STATE64), count=42
+    write_u32_le(output_fd, 4)  // flavor
+    write_u32_le(output_fd, 42)  // count
+    // Thread state: 168 bytes = 21 uint64 values
+    // The entry point goes in RIP (register 16, offset 16*8=128)
+    // We write all zeros except RIP = text_vmaddr (entry point)
+    let mut ti = 0
+    while ti < 21
+        if ti == 16  // RIP
+            write_u64_le(output_fd, text_vmaddr)
+        else
+            write_u64_le(output_fd, 0)
+        ti = ti + 1
+
+    // === Code (__TEXT,__text) ===
+    let mut ci = 0
+    while ci < code_len
+        write_byte(output_fd, ctx.code_data[ci])
+        ci = ci + 1
+
+    // === Data ===
+    let mut di = 0
+    while di < data_len
+        write_byte(output_fd, ctx.data_data[di])
+        di = di + 1
+
+    return 0
+
+fn macho_write_segname(fd int, name str)
+    let name_bytes = name.bytes()
+    let mut ni = 0
+    while ni < 16
+        if ni < name_bytes.len()
+            write_byte(fd, name_bytes[ni])
+        else
+            write_byte(fd, 0)
+        ni = ni + 1
+
+fn macho_write_sectname(fd int, name str)
+    let name_bytes = name.bytes()
+    let mut ni = 0
+    while ni < 16
+        if ni < name_bytes.len()
+            write_byte(fd, name_bytes[ni])
+        else
+            write_byte(fd, 0)
+        ni = ni + 1
+
+fn macho_align_up(val int, alignment int) int
+    let rem = val % alignment
+    if rem == 0
+        return val
+    return val + alignment - rem
+// wasm_cg_print_int_v2: print an i64 integer to stdout via WASI fd_write
+// The value is on top of the WASM stack (i64).
+// Uses linear memory scratch areas:
+//   640: the value being converted (i64)
+//   648: digit count (i32)
+//   652: loop index (i32)
+//   540: reversed digit buffer (32 bytes)
+//   600: forward digit buffer (32 bytes)
+//   512: iov struct (8 bytes: ptr + len)
+//   520: nwritten result (4 bytes)
+fn wasm_cg_print_int_v2(ctx Ctx)
+    // The value has already been stored at address 640 by the caller.
+    // (Caller pushes 640, then the value, then i64.store.)
+    // Now we do digit extraction from memory.
+
+    // Initialize digit count = 0 at address 648
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 648)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_STORE)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+
+    // Handle zero specially: if value == 0, print "0"
+    w_byte(ctx, WASM_OP_BLOCK)
+    w_byte(ctx, WASM_TYPE_EMPTY_BLOCK)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 640)
+    w_byte(ctx, WASM_OP_I64_LOAD)
+    w_u32_leb128(ctx, 3)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I64_CONST)
+    w_i64_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I64_NE)
+    w_byte(ctx, WASM_OP_BR_IF)
+    w_u32_leb128(ctx, 0)
+    // Value is 0: set count = 1, rev_buf[0] = '0'
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 648)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 1)
+    w_byte(ctx, WASM_OP_I32_STORE)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 540)
+    w_byte(ctx, WASM_OP_I64_CONST)
+    w_i64_leb128(ctx, 48)
+    w_byte(ctx, WASM_OP_I64_STORE8)
+    w_u32_leb128(ctx, 0)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_END)
+
+    // Digit extraction loop (only runs if value != 0)
+    w_byte(ctx, WASM_OP_BLOCK)
+    w_byte(ctx, WASM_TYPE_EMPTY_BLOCK)
+    w_byte(ctx, WASM_OP_LOOP)
+    w_byte(ctx, WASM_TYPE_EMPTY_BLOCK)
+    // if value == 0, break
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 640)
+    w_byte(ctx, WASM_OP_I64_LOAD)
+    w_u32_leb128(ctx, 3)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I64_EQZ)
+    w_byte(ctx, WASM_OP_BR_IF)
+    w_u32_leb128(ctx, 1)
+    // Compute address FIRST (rev_buf + count), then digit, then store.
+    // WASM store8: [addr, val] → []. addr deeper, val on top.
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 540)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 648)
+    w_byte(ctx, WASM_OP_I32_LOAD)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_ADD)
+    // Now stack: [addr]. Compute digit = value % 10 + 48
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 640)
+    w_byte(ctx, WASM_OP_I64_LOAD)
+    w_u32_leb128(ctx, 3)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I64_CONST)
+    w_i64_leb128(ctx, 10)
+    w_byte(ctx, WASM_OP_I64_REM_S)
+    w_byte(ctx, WASM_OP_I64_CONST)
+    w_i64_leb128(ctx, 48)
+    w_byte(ctx, WASM_OP_I64_ADD)
+    // Now stack: [addr, digit_char]. Store!
+    w_byte(ctx, WASM_OP_I64_STORE8)
+    w_u32_leb128(ctx, 0)
+    w_u32_leb128(ctx, 0)
+    // count++
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 648)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 648)
+    w_byte(ctx, WASM_OP_I32_LOAD)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 1)
+    w_byte(ctx, WASM_OP_I32_ADD)
+    w_byte(ctx, WASM_OP_I32_STORE)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    // value = value / 10
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 640)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 640)
+    w_byte(ctx, WASM_OP_I64_LOAD)
+    w_u32_leb128(ctx, 3)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I64_CONST)
+    w_i64_leb128(ctx, 10)
+    w_byte(ctx, WASM_OP_I64_DIV_S)
+    w_byte(ctx, WASM_OP_I64_STORE)
+    w_u32_leb128(ctx, 3)
+    w_u32_leb128(ctx, 0)
+    // Loop back
+    w_byte(ctx, WASM_OP_BR)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_END)
+    w_byte(ctx, WASM_OP_END)
+
+    // Reverse digits: for i = 0..count, fwd_buf[i] = rev_buf[count-1-i]
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 652)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_STORE)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_BLOCK)
+    w_byte(ctx, WASM_TYPE_EMPTY_BLOCK)
+    w_byte(ctx, WASM_OP_LOOP)
+    w_byte(ctx, WASM_TYPE_EMPTY_BLOCK)
+    // if i >= count, break
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 652)
+    w_byte(ctx, WASM_OP_I32_LOAD)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 648)
+    w_byte(ctx, WASM_OP_I32_LOAD)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_GE_S)
+    w_byte(ctx, WASM_OP_BR_IF)
+    w_u32_leb128(ctx, 1)
+    // fwd_buf[i] = rev_buf[count-1-i]
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 600)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 652)
+    w_byte(ctx, WASM_OP_I32_LOAD)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_ADD)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 540)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 648)
+    w_byte(ctx, WASM_OP_I32_LOAD)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 652)
+    w_byte(ctx, WASM_OP_I32_LOAD)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_SUB)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 1)
+    w_byte(ctx, WASM_OP_I32_SUB)
+    w_byte(ctx, WASM_OP_I32_ADD)
+    w_byte(ctx, WASM_OP_I64_LOAD8_U)
+    w_u32_leb128(ctx, 0)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I64_STORE8)
+    w_u32_leb128(ctx, 0)
+    w_u32_leb128(ctx, 0)
+    // i++
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 652)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 652)
+    w_byte(ctx, WASM_OP_I32_LOAD)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 1)
+    w_byte(ctx, WASM_OP_I32_ADD)
+    w_byte(ctx, WASM_OP_I32_STORE)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_BR)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_END)
+    w_byte(ctx, WASM_OP_END)
+
+    // Set up iov: ptr=600, len=count
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 512)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 600)
+    w_byte(ctx, WASM_OP_I32_STORE)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 516)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 648)
+    w_byte(ctx, WASM_OP_I32_LOAD)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+    w_byte(ctx, WASM_OP_I32_STORE)
+    w_u32_leb128(ctx, 2)
+    w_u32_leb128(ctx, 0)
+
+    // Call fd_write(1, 512, 1, 520)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 1)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 512)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 1)
+    w_byte(ctx, WASM_OP_I32_CONST)
+    w_i32_leb128(ctx, 520)
+    w_byte(ctx, WASM_OP_CALL)
+    w_u32_leb128(ctx, WASM_WASI_FD_WRITE)
+    w_byte(ctx, WASM_OP_DROP)
+
+// wasm_store_and_print_int: helper called by callers to store value at 640 then print
+// Caller has already pushed the value onto the stack.
+// We push 640 (addr) on top, then i64.store stores value at 640.
+// Wait — store needs [addr, val] with addr deeper. But we have [val, 640].
+// So this won't work either.
+//
+// The REAL fix: callers must push addr BEFORE evaluating the expression.
+// Let's change the callers directly.
+
+
+// ===========================================================================
+// Boot sector format — for bootloaders, BIOS, UEFI, embedded boot images
+// ===========================================================================
+// Produces a 512-byte boot sector with 0x55 0xAA signature.
+// Load address defaults to 0x7C00 (standard BIOS boot sector address).
+// Custom load address via /tmp/yilt_raw_base (decimal).
+// ===========================================================================
+
+let BOOT_DEFAULT_BASE = 0x7C00
+
+fn build_boot(ctx Ctx, output_fd int) int
+    let code_len = ctx.code_len
+    let data_len = ctx.data_len
+
+    // Write code bytes
+    let mut ci = 0
+    while ci < code_len
+        write_byte(output_fd, ctx.code_data[ci])
+        ci = ci + 1
+
+    // Write data bytes
+    let mut di = 0
+    while di < data_len
+        write_byte(output_fd, ctx.data_data[di])
+        di = di + 1
+
+    // Pad to 510 bytes, then add boot signature
+    let total = code_len + data_len
+    let mut pad = total
+    while pad < 510
+        write_byte(output_fd, 0)
+        pad = pad + 1
+    // Boot signature: 0x55 0xAA
+    write_byte(output_fd, 0x55)
+    write_byte(output_fd, 0xAA)
+
+    return 0
+
+// ===========================================================================
+// Flat binary format — for OS kernels, firmware, bare-metal, embedded
+// ===========================================================================
+// Produces a flat binary with no headers and no padding.
+// Just code + data concatenated.
+// Custom load address via /tmp/yilt_raw_base (decimal, default 0x100000).
+// ===========================================================================
+
+fn build_flat(ctx Ctx, output_fd int) int
+    let code_len = ctx.code_len
+    let data_len = ctx.data_len
+
+    // Write code bytes
+    let mut ci = 0
+    while ci < code_len
+        write_byte(output_fd, ctx.code_data[ci])
+        ci = ci + 1
+
+    // Write data bytes
+    let mut di = 0
+    while di < data_len
+        write_byte(output_fd, ctx.data_data[di])
+        di = di + 1
+
+    return 0
+
+// ===========================================================================
+// RV32 (RISC-V 32-bit) support — target=4
+// ===========================================================================
+// RV32 uses the same instruction encoding as RV64 but with 32-bit registers.
+// Key differences:
+// - LW/SW (funct3=2) instead of LD/SD (funct3=3)
+// - 4-byte stack slots instead of 8-byte
+// - ELF flags: soft-float ABI
+//
+// For simplicity, RV32 reuses the RV64 codegen functions but with adjusted
+// load/store width. The target is selected via /tmp/yilt_target_rv32.
+// ===========================================================================
+
+let RV32_F3_LW = 2  // 32-bit load
+let RV32_F3_SW = 2  // 32-bit store
+
+// rv32_ld: 32-bit load (LW instead of LD)
+fn rv32_ld(ctx Ctx, rd int, rs1 int, offset int)
+    rv_emit(ctx, rv_enc_i(RV_OP_LOAD, rd, RV32_F3_LW, rs1, offset))
+
+// rv32_sd: 32-bit store (SW instead of SD)
+fn rv32_sd(ctx Ctx, rs2 int, rs1 int, offset int)
+    rv_emit(ctx, rv_enc_s(RV_OP_STORE, RV32_F3_SW, rs1, rs2, offset))
+
+// RV32 uses the same cg_expr/cg_stmt/cg_function dispatch as RV64.
+// The target field 4 maps to rv_* functions with rv32_ld/rv32_sd.
+// For now, RV32 shares the RV64 codegen path (target==2).
+// To fully support RV32, we'd need separate rv32_cg_* functions that use
+// rv32_ld/rv32_sd and 4-byte stack slots.
+
+// ===========================================================================
+// RV32 (RISC-V 32-bit) full codegen — target=4
+// ===========================================================================
+// RV32 uses 32-bit registers and 4-byte stack slots.
+// Key differences from RV64:
+// - LW/SW (funct3=2) instead of LD/SD (funct3=3)
+// - 4-byte stack slots (next_slot decrements by 4, not 8)
+// - 8-byte alignment for stack (push/pop use 8 bytes)
+// - Same instruction encoding (RV32I is a subset of RV64I)
+// ===========================================================================
+
+// RV32 push: SW rs, [sp, 4]; ADDI sp, sp, -8 (8-byte aligned, 4-byte data)
+fn rv32_push(ctx Ctx, rs int)
+    rv_addi(ctx, RV_SP, RV_SP, -8)
+    rv32_sd(ctx, rs, RV_SP, 4)
+
+// RV32 pop: LW rd, [sp, 4]; ADDI sp, sp, 8
+fn rv32_pop(ctx Ctx, rd int)
+    rv32_ld(ctx, rd, RV_SP, 4)
+    rv_addi(ctx, RV_SP, RV_SP, 8)
+
+// RV32 codegen dispatchers — mirror RV64 but with 4-byte slots
+
+fn rv32_cg_expr(ctx Ctx, e Node)
+    if e.kind == "int_lit"
+        let val = parse_int(e.sval)
+        rv_li(ctx, RV_A0, val)
+        return
+    if e.kind == "bool_true"
+        rv_li(ctx, RV_A0, 1)
+        return
+    if e.kind == "bool_false"
+        rv_li(ctx, RV_A0, 0)
+        return
+    if e.kind == "nil"
+        rv_li(ctx, RV_A0, 0)
+        return
+    if e.kind == "float_lit"
+        let val = parse_int(e.sval)
+        rv_li(ctx, RV_A0, val)
+        return
+    if e.kind == "ident"
+        let offset = cg_get_var_offset(ctx, e.sval)
+        rv32_ld(ctx, RV_A0, RV_FP, offset)
+        return
+    if e.kind == "binary"
+        rv32_cg_binary(ctx, e)
+        return
+    if e.kind == "unary"
+        rv32_cg_unary(ctx, e)
+        return
+    if e.kind == "call"
+        rv32_cg_call(ctx, e)
+        return
+    if e.kind == "string_lit"
+        let data_off = ctx.data_len
+        cg_add_string(ctx, e.sval)
+        let auipc_pos = ctx.code_len
+        rv_auipc(ctx, RV_A0, 0)
+        rv_addi(ctx, RV_A0, RV_A0, 0)
+        rv_add_fixup(ctx, auipc_pos, data_off)
+        return
+    if e.kind == "if_expr"
+        rv32_cg_if_expr(ctx, e)
+        return
+    rv_li(ctx, RV_A0, 0)
+
+fn rv32_cg_binary(ctx Ctx, e Node)
+    let la = e.a
+    let rb = e.b
+    let op = e.sval
+
+    if op == "and"
+        rv32_cg_expr(ctx, la[0])
+        rv32_push(ctx, RV_A0)
+        rv32_cg_expr(ctx, rb[0])
+        rv32_pop(ctx, RV_T0)
+        rv_sltu(ctx, RV_A0, RV_ZERO, RV_A0)
+        rv_sltu(ctx, RV_T0, RV_ZERO, RV_T0)
+        rv_and(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "or"
+        rv32_cg_expr(ctx, la[0])
+        rv32_push(ctx, RV_A0)
+        rv32_cg_expr(ctx, rb[0])
+        rv32_pop(ctx, RV_T0)
+        rv_sltu(ctx, RV_A0, RV_ZERO, RV_A0)
+        rv_sltu(ctx, RV_T0, RV_ZERO, RV_T0)
+        rv_or(ctx, RV_A0, RV_T0, RV_A0)
+        return
+
+    rv32_cg_expr(ctx, la[0])
+    rv32_push(ctx, RV_A0)
+    rv32_cg_expr(ctx, rb[0])
+    rv32_pop(ctx, RV_T0)
+
+    if op == "+"
+        rv_add(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "-"
+        rv_sub(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "*"
+        rv_mul(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "/"
+        rv_div(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "%"
+        rv_rem(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "=="
+        rv_sub(ctx, RV_T1, RV_T0, RV_A0)
+        rv_sltu(ctx, RV_A0, RV_T1, 1)
+        return
+    if op == "!="
+        rv_sub(ctx, RV_T1, RV_T0, RV_A0)
+        rv_sltu(ctx, RV_A0, RV_ZERO, RV_T1)
+        return
+    if op == "<"
+        rv_slt(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == ">"
+        rv_slt(ctx, RV_A0, RV_A0, RV_T0)
+        return
+    if op == "<="
+        rv_slt(ctx, RV_T1, RV_A0, RV_T0)
+        rv_xori(ctx, RV_A0, RV_T1, 1)
+        return
+    if op == ">="
+        rv_slt(ctx, RV_T1, RV_T0, RV_A0)
+        rv_xori(ctx, RV_A0, RV_T1, 1)
+        return
+    if op == "&"
+        rv_and(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "|"
+        rv_or(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    if op == "^"
+        rv_xor(ctx, RV_A0, RV_T0, RV_A0)
+        return
+    rv_li(ctx, RV_A0, 0)
+
+fn rv32_cg_unary(ctx Ctx, e Node)
+    let operand = e.a[0]
+    let op = e.sval
+    if op == "-"
+        rv32_cg_expr(ctx, operand)
+        rv_sub(ctx, RV_A0, RV_ZERO, RV_A0)
+        return
+    if op == "!"
+        rv32_cg_expr(ctx, operand)
+        rv_sltu(ctx, RV_A0, RV_A0, 1)
+        return
+    if op == "~"
+        rv32_cg_expr(ctx, operand)
+        rv_xori(ctx, RV_A0, RV_A0, -1)
+        return
+    rv32_cg_expr(ctx, operand)
+
+fn rv32_cg_call(ctx Ctx, e Node)
+    let fa = e.a
+    if fa[0].kind != "ident"
+        rv_li(ctx, RV_A0, 0)
+        return
+    let fn_name = fa[0].sval
+
+    if fn_name == "println" or fn_name == "print"
+        let args = e.list
+        if args.len() > 0
+            let arg = args[0]
+            if arg.kind == "string_lit"
+                rv_cg_print_string_lit(ctx, arg.sval)
+            else
+                if arg.kind == "int_lit"
+                    rv_li(ctx, RV_A0, parse_int(arg.sval))
+                    rv_cg_print_int(ctx)
+                else
+                    if arg.kind == "bool_true"
+                        rv_cg_print_string_lit(ctx, "true")
+                    else
+                        if arg.kind == "bool_false"
+                            rv_cg_print_string_lit(ctx, "false")
+                        else
+                            rv32_cg_expr(ctx, arg)
+                            rv_cg_print_int(ctx)
+            if fn_name == "println"
+                rv_cg_print_string_lit(ctx, "\n")
+        return
+    if fn_name == "len"
+        let args = e.list
+        if args.len() > 0
+            rv32_cg_expr(ctx, args[0])
+            rv32_ld(ctx, RV_A0, RV_A0, 0)
+            return
+        rv_li(ctx, RV_A0, 0)
+        return
+
+    // User-defined function call
+    let args = e.list
+    let nargs = args.len()
+    let mut ai = nargs - 1
+    while ai >= 0 and ai < 8
+        rv32_cg_expr(ctx, args[ai])
+        if ai == 1
+            rv_mv(ctx, RV_A1, RV_A0)
+        if ai == 2
+            rv_mv(ctx, RV_A2, RV_A0)
+        if ai == 3
+            rv_mv(ctx, RV_A3, RV_A0)
+        if ai == 4
+            rv_mv(ctx, RV_A4, RV_A0)
+        if ai == 5
+            rv_mv(ctx, RV_A5, RV_A0)
+        if ai == 6
+            rv_mv(ctx, RV_A6, RV_A0)
+        if ai == 7
+            rv_mv(ctx, RV_A7, RV_A0)
+        ai = ai - 1
+
+    let jal_pos = ctx.code_len
+    rv_jal(ctx, RV_RA, 0)
+    let cidx = ctx.call_fixup_count
+    ctx.call_fixups[cidx * 2] = jal_pos
+    ctx.call_fixups[cidx * 2 + 1] = fn_name
+    ctx.call_fixup_count = cidx + 1
+
+fn rv32_cg_if_expr(ctx Ctx, e Node)
+    rv_li(ctx, RV_A0, 0)
+
+fn rv32_cg_stmt(ctx Ctx, s Node)
+    if s.kind == "let_stmt"
+        let va = s.a
+        let init = va[0]
+        if init.kind == "string_lit"
+            ctx.var_types[s.sval] = "str"
+        if init.kind == "int_lit"
+            ctx.var_types[s.sval] = "int"
+        if init.kind == "bool_true"
+            ctx.var_types[s.sval] = "bool"
+        if init.kind == "bool_false"
+            ctx.var_types[s.sval] = "bool"
+        if init.kind == "ident"
+            if ctx.var_types.has(init.sval)
+                ctx.var_types[s.sval] = ctx.var_types[init.sval]
+        rv32_cg_expr(ctx, init)
+        let offset = cg_get_var_offset(ctx, s.sval)
+        rv32_sd(ctx, RV_A0, RV_FP, offset)
+        return
+    if s.kind == "return"
+        if s.a.has(0)
+            let va = s.a
+            rv32_cg_expr(ctx, va[0])
+        if ctx.is_main
+            if not s.a.has(0)
+                rv_li(ctx, RV_A0, 0)
+            rv_li(ctx, RV_A7, 93)
+            rv_ecall(ctx)
+        else
+            rv32_emit_epilogue(ctx)
+        return
+    if s.kind == "expr_stmt"
+        let ea = s.a
+        rv32_cg_expr(ctx, ea[0])
+        return
+    if s.kind == "assign"
+        let ea = s.a
+        let vb = s.b
+        let target = ea[0]
+        if target.kind == "ident"
+            rv32_cg_expr(ctx, vb[0])
+            let offset = cg_get_var_offset(ctx, target.sval)
+            rv32_sd(ctx, RV_A0, RV_FP, offset)
+            return
+        rv32_cg_expr(ctx, vb[0])
+        return
+    if s.kind == "if_stmt"
+        rv32_cg_if(ctx, s)
+        return
+    if s.kind == "while_stmt"
+        rv32_cg_while(ctx, s)
+        return
+    if s.kind == "for_stmt"
+        if s.bval
+            rv32_cg_for_range(ctx, s)
+        return
+    if s.kind == "assert_stmt"
+        let ea = s.a
+        rv32_cg_expr(ctx, ea[0])
+        return
+
+fn rv32_cg_if(ctx Ctx, s Node)
+    let branches = s.list
+    let mut end_jumps = {}
+    let mut njumps = 0
+    let mut bi = 0
+    while bi < branches.len()
+        let b = branches[bi]
+        let ca = b.a
+        rv32_cg_expr(ctx, ca[0])
+        rv_beq(ctx, RV_A0, RV_ZERO, 0)
+        let beq_next_pos = ctx.code_len - 4
+        let block = b.b
+        let mut si = 0
+        while si < block.len()
+            rv32_cg_stmt(ctx, block[si])
+            si = si + 1
+        let b_end_pos = ctx.code_len
+        rv_jal(ctx, RV_ZERO, 0)
+        end_jumps[njumps] = b_end_pos
+        njumps = njumps + 1
+        let next_target = ctx.code_len
+        rv_patch_branch(ctx, beq_next_pos, next_target)
+        bi = bi + 1
+    if s.a.has(0)
+        let eb = s.a
+        let else_block = eb[0].list
+        let mut j = 0
+        while j < else_block.len()
+            rv32_cg_stmt(ctx, else_block[j])
+            j = j + 1
+    let end_target = ctx.code_len
+    let mut ji = 0
+    while ji < njumps
+        let jmp_pos = end_jumps[ji]
+        rv_patch_jal(ctx, jmp_pos, end_target)
+        ji = ji + 1
+
+fn rv32_cg_while(ctx Ctx, s Node)
+    let ea = s.a
+    let cond = ea[0]
+    let loop_start = ctx.code_len
+    rv32_cg_expr(ctx, cond)
+    rv_beq(ctx, RV_A0, RV_ZERO, 0)
+    let beq_end_pos = ctx.code_len - 4
+    let ld = ctx.loop_depth
+    ctx.continue_targets[ld] = loop_start
+    ctx.break_targets[ld] = beq_end_pos
+    ctx.loop_depth = ld + 1
+    let body = s.list
+    let mut i = 0
+    while i < body.len()
+        rv32_cg_stmt(ctx, body[i])
+        i = i + 1
+    ctx.loop_depth = ld
+    let b_loop_pos = ctx.code_len
+    rv_jal(ctx, RV_ZERO, 0)
+    rv_patch_jal(ctx, b_loop_pos, loop_start)
+    let end_target = ctx.code_len
+    rv_patch_branch(ctx, beq_end_pos, end_target)
+
+fn rv32_cg_for_range(ctx Ctx, s Node)
+    let la = s.a
+    let rb = s.b
+    let i_offset = cg_get_var_offset(ctx, s.sval)
+    rv32_cg_expr(ctx, la[0])
+    rv32_sd(ctx, RV_A0, RV_FP, i_offset)
+
+    let loop_start = ctx.code_len
+    rv32_ld(ctx, RV_A0, RV_FP, i_offset)
+    rv32_cg_expr(ctx, rb[0])
+    rv_mv(ctx, RV_T0, RV_A0)
+    rv32_ld(ctx, RV_A0, RV_FP, i_offset)
+    rv_bge(ctx, RV_A0, RV_T0, 0)
+    let bge_end_pos = ctx.code_len - 4
+
+    let ld = ctx.loop_depth
+    ctx.continue_targets[ld] = loop_start
+    ctx.break_targets[ld] = bge_end_pos
+    ctx.loop_depth = ld + 1
+    let body = s.list
+    let mut i = 0
+    while i < body.len()
+        rv32_cg_stmt(ctx, body[i])
+        i = i + 1
+    ctx.loop_depth = ld
+
+    rv32_ld(ctx, RV_A0, RV_FP, i_offset)
+    rv_addi(ctx, RV_A0, RV_A0, 1)
+    rv32_sd(ctx, RV_A0, RV_FP, i_offset)
+    let b_loop_pos = ctx.code_len
+    rv_jal(ctx, RV_ZERO, 0)
+    rv_patch_jal(ctx, b_loop_pos, loop_start)
+    let end_target = ctx.code_len
+    rv_patch_branch(ctx, bge_end_pos, end_target)
+
+// RV32 prologue: ADDI sp, sp, -total; SW ra, [sp, 0]; SW s0, [sp, 4]; ADDI s0, sp, total
+fn rv32_emit_prologue(ctx Ctx) int
+    let addi_sp_pos = ctx.code_len
+    rv_addi(ctx, RV_SP, RV_SP, 0)
+    rv32_sd(ctx, RV_RA, RV_SP, 0)
+    rv32_sd(ctx, RV_FP, RV_SP, 4)
+    let addi_fp_pos = ctx.code_len
+    rv_addi(ctx, RV_FP, RV_SP, 0)
+    return addi_sp_pos
+
+// RV32 epilogue: LW ra, [sp, 0]; LW s0, [sp, 4]; ADDI sp, sp, total; RET
+fn rv32_emit_epilogue(ctx Ctx)
+    let frame_size = 0 - ctx.next_slot - 4
+    let mut aligned = frame_size
+    if aligned % 8 != 0
+        aligned = aligned + (8 - (aligned % 8))
+    let total = aligned + 8
+    rv32_ld(ctx, RV_RA, RV_SP, 0)
+    rv32_ld(ctx, RV_FP, RV_SP, 4)
+    rv_addi(ctx, RV_SP, RV_SP, total)
+    rv_ret(ctx)
+
+fn rv32_cg_function(ctx Ctx, fn_decl Node, is_main bool)
+    let fn_start = ctx.code_len
+    let fn_name = fn_decl.sval
+    ctx.fn_table[fn_name] = fn_start
+    ctx.fn_count = ctx.fn_count + 1
+    ctx.var_slots = {}
+    ctx.next_slot = -4  // RV32: 4-byte slots
+    ctx.var_types = {}
+
+    let addi_sp_pos = rv32_emit_prologue(ctx)
+
+    let params = fn_decl.a
+    let mut pi = 0
+    while pi < params.len() and pi < 8
+        let param = params[pi]
+        let local_offset = cg_get_var_offset(ctx, param.sval)
+        rv32_sd(ctx, 10 + pi, RV_FP, local_offset)
+        ctx.var_types[param.sval] = param.extra
+        pi = pi + 1
+
+    ctx.is_main = is_main
+    let body = fn_decl.list
+    let mut i = 0
+    while i < body.len()
+        rv32_cg_stmt(ctx, body[i])
+        i = i + 1
+
+    if is_main
+        rv_li(ctx, RV_A0, 0)
+        rv_li(ctx, RV_A7, 93)
+        rv_ecall(ctx)
+    else
+        rv_li(ctx, RV_A0, 0)
+        rv32_emit_epilogue(ctx)
+
+    // Patch frame size (RV32: 4-byte slots, 8-byte alignment)
+    let frame_size = 0 - ctx.next_slot - 4
+    let mut aligned = frame_size
+    if aligned % 8 != 0
+        aligned = aligned + (8 - (aligned % 8))
+    let total = aligned + 8
+    let neg_total = 0 - total
+    if total >= -2048 and total <= 2047
+        let instr_sp = rv_enc_i(RV_OP_OP_IMM, RV_SP, RV_F3_ADDI, RV_SP, neg_total)
+        ctx.code_data[addi_sp_pos] = instr_sp % 256
+        ctx.code_data[addi_sp_pos + 1] = (instr_sp / 256) % 256
+        ctx.code_data[addi_sp_pos + 2] = (instr_sp / 65536) % 256
+        ctx.code_data[addi_sp_pos + 3] = (instr_sp / 16777216) % 256
+        // Patch SW ra, [sp, 0]
+        let sd_ra_pos = addi_sp_pos + 4
+        let sd_ra_instr = rv_enc_s(RV_OP_STORE, RV32_F3_SW, RV_SP, RV_RA, 0)
+        ctx.code_data[sd_ra_pos] = sd_ra_instr % 256
+        ctx.code_data[sd_ra_pos + 1] = (sd_ra_instr / 256) % 256
+        ctx.code_data[sd_ra_pos + 2] = (sd_ra_instr / 65536) % 256
+        ctx.code_data[sd_ra_pos + 3] = (sd_ra_instr / 16777216) % 256
+        // Patch SW s0, [sp, 4]
+        let sd_s0_pos = sd_ra_pos + 4
+        let sd_s0_instr = rv_enc_s(RV_OP_STORE, RV32_F3_SW, RV_SP, RV_FP, 4)
+        ctx.code_data[sd_s0_pos] = sd_s0_instr % 256
+        ctx.code_data[sd_s0_pos + 1] = (sd_s0_instr / 256) % 256
+        ctx.code_data[sd_s0_pos + 2] = (sd_s0_instr / 65536) % 256
+        ctx.code_data[sd_s0_pos + 3] = (sd_s0_instr / 16777216) % 256
+        // Patch ADDI s0, sp, total
+        let addi_fp_pos = sd_s0_pos + 4
+        let addi_fp_instr = rv_enc_i(RV_OP_OP_IMM, RV_FP, RV_F3_ADDI, RV_SP, total)
+        ctx.code_data[addi_fp_pos] = addi_fp_instr % 256
+        ctx.code_data[addi_fp_pos + 1] = (addi_fp_instr / 256) % 256
+        ctx.code_data[addi_fp_pos + 2] = (addi_fp_instr / 65536) % 256
+        ctx.code_data[addi_fp_pos + 3] = (addi_fp_instr / 16777216) % 256
